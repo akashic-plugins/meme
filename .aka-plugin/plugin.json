@@ -1,0 +1,15 @@
+{
+  "name": "meme",
+  "version": "0.1.0",
+  "description": "Akashic meme lifecycle and skill plugin",
+  "paths": {
+    "skills": [
+      "skills"
+    ]
+  },
+  "akashic": {
+    "lifecycle": {
+      "entry": "plugin.py"
+    }
+  }
+}
