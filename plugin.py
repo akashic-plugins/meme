@@ -10,8 +10,10 @@ from agent.prompting import PromptSectionRender
 from .runtime import MemeCatalog, MemeDecorator
 
 _CTX_SLOT = "prompt:ctx"
-_MEME_RE = re.compile(r"<meme:([a-zA-Z0-9_-]+)>", re.IGNORECASE)
-_MEME_PROTOCOL_RE = re.compile(r"<meme:[^>]*>", re.IGNORECASE)
+_TAIL_MEME_RE = re.compile(
+    r"(?s)^(.*?)(?:\s*<meme:([a-zA-Z0-9_-]+)>)\s*$",
+    re.IGNORECASE,
+)
 
 
 class MemePromptModule:
@@ -75,11 +77,10 @@ class MemePlugin(Plugin):
 
 
 def _extract_meme_tag(response: str) -> tuple[str, str | None]:
-    first = _MEME_RE.search(response)
-    cleaned = _MEME_PROTOCOL_RE.sub("", response).strip()
-    if first is None:
-        return cleaned, None
-    return cleaned, first.group(1).lower()
+    match = _TAIL_MEME_RE.match(response)
+    if match is None:
+        return response.strip(), None
+    return match.group(1).strip(), match.group(2).lower()
 
 
 def _workspace(plugin_dir: Path, configured: Path | None) -> Path:

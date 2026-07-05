@@ -72,6 +72,8 @@ def test_catalog_builds_prompt_block(tmp_path: Path) -> None:
     block = MemeCatalog(tmp_path / "memes").build_prompt_block()
     assert block is not None
     assert "<meme:shy>" in block
+    assert "只有当你真的要发这个表情时" in block
+    assert "代码样式的 `<meme:category>`" in block
 
 
 def test_decorator_picks_image_for_tag(tmp_path: Path) -> None:
@@ -125,3 +127,27 @@ async def test_meme_plugin_decorates_after_reasoning(tmp_path: Path) -> None:
     assert out.reply == "好的"
     assert out.media == [str(image)]
     assert out.meme_tag == "shy"
+
+
+@pytest.mark.asyncio
+async def test_meme_plugin_only_accepts_trailing_tag(tmp_path: Path) -> None:
+    _write_meme_workspace(tmp_path)
+    plugin = await _make_plugin(tmp_path)
+    ctx = AfterReasoningCtx(
+        session_key="telegram:1",
+        channel="telegram",
+        chat_id="1",
+        tools_used=(),
+        thinking=None,
+        response_metadata=ResponseMetadata(
+            raw_text="应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
+        ),
+        streamed=False,
+        tool_chain=(),
+        context_retry={},
+        reply="应该是 `<meme:shy>`。\n\n<æm>shy</æm>",
+    )
+    out = await plugin.decorate_meme(ctx)
+    assert out.reply == "应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
+    assert out.media == []
+    assert out.meme_tag is None
