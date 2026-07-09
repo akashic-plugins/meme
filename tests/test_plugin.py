@@ -130,7 +130,29 @@ async def test_meme_plugin_decorates_after_reasoning(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_meme_plugin_only_accepts_trailing_tag(tmp_path: Path) -> None:
+async def test_meme_plugin_accepts_inline_tag(tmp_path: Path) -> None:
+    image = _write_meme_workspace(tmp_path)
+    plugin = await _make_plugin(tmp_path)
+    ctx = AfterReasoningCtx(
+        session_key="telegram:1",
+        channel="telegram",
+        chat_id="1",
+        tools_used=(),
+        thinking=None,
+        response_metadata=ResponseMetadata(raw_text="快了 <meme:shy>\n\n马上到了"),
+        streamed=False,
+        tool_chain=(),
+        context_retry={},
+        reply="快了 <meme:shy>\n\n马上到了",
+    )
+    out = await plugin.decorate_meme(ctx)
+    assert out.reply == "快了\n\n马上到了"
+    assert out.media == [str(image)]
+    assert out.meme_tag == "shy"
+
+
+@pytest.mark.asyncio
+async def test_meme_plugin_ignores_code_tag(tmp_path: Path) -> None:
     _write_meme_workspace(tmp_path)
     plugin = await _make_plugin(tmp_path)
     ctx = AfterReasoningCtx(
