@@ -43,6 +43,11 @@ class MemePromptModule:
 
 class MemePlugin(Plugin):
     name = "meme"
+    version = "1.0.0"
+
+    @classmethod
+    def skill_roots(cls) -> tuple[str, ...]:
+        return ("skills",)
     _catalog: Any = None
     _decorator: Any = None
 
