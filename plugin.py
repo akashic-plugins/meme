@@ -42,6 +42,10 @@ class MemePromptModule:
 
 
 class MemePlugin(Plugin):
+    @classmethod
+    def dashboard_module(cls) -> str | None:
+        return "dashboard.py"
+
     name = "meme"
     version = "1.0.0"
 
