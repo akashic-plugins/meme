@@ -63,7 +63,7 @@ async def _make_plugin(tmp_path: Path) -> MemePlugin:
         kv_store=PluginKVStore(plugin_dir / ".kv.json"),
         workspace=tmp_path,
     )
-    await plugin.initialize()
+    await plugin.prepare()
     return plugin
 
 
