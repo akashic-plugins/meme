@@ -42,6 +42,7 @@ class MemePromptModule:
 
 
 class MemePlugin(Plugin):
+    api_version = 2
     @classmethod
     def dashboard_module(cls) -> str | None:
         return "dashboard.py"
@@ -55,7 +56,7 @@ class MemePlugin(Plugin):
     _catalog: Any = None
     _decorator: Any = None
 
-    async def initialize(self) -> None:
+    async def prepare(self) -> None:
         memes_dir = _workspace(self.context.plugin_dir, self.context.workspace) / "memes"
         self._catalog = MemeCatalog(memes_dir)
         self._decorator = MemeDecorator(self._catalog)
