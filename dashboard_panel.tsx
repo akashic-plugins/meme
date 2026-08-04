@@ -1,5 +1,6 @@
 /// <reference path="../../types/akashic-dashboard.d.ts" />
 import { useEffect, useState } from "react";
+import { api } from "@akashic/dashboard-ui";
 
 // The Akashic Dashboard injects itself globally.
 // We declare it here to satisfy TypeScript in our standalone build.
@@ -8,8 +9,6 @@ declare global {
     AkashicDashboard: any;
   }
 }
-
-const { api } = window.AkashicDashboard;
 
 interface Category {
   tag: string;
