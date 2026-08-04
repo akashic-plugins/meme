@@ -1,7 +1,17 @@
+.plugin-workbench-pane:has(> .plugin-workbench-root[data-akashic-plugin="meme"]) {
+  overflow: hidden;
+}
+
+.plugin-workbench-root[data-akashic-plugin="meme"] {
+  height: 100%;
+  min-height: 0;
+}
+
 .meme-dashboard {
   display: grid;
   grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   flex: 1;
+  height: 100%;
   min-height: 0;
   gap: 28px;
   overflow: hidden;
@@ -151,7 +161,7 @@
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .meme-dashboard__header {
