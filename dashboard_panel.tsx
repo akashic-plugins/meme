@@ -1,5 +1,5 @@
 /// <reference path="../../types/akashic-dashboard.d.ts" />
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 
 // The Akashic Dashboard injects itself globally.
 // We declare it here to satisfy TypeScript in our standalone build.
@@ -9,7 +9,7 @@ declare global {
   }
 }
 
-const { api, ui } = window.AkashicDashboard;
+const { api } = window.AkashicDashboard;
 
 interface Category {
   tag: string;
@@ -20,75 +20,12 @@ interface Category {
   count: number;
 }
 
-function MagicIndicator(props: { containerRef: React.RefObject<HTMLElement | null>; activeSelector: string; deps: any[] }) {
-  const [style, setStyle] = useState<any>({ opacity: 0 });
-
-  useEffect(() => {
-    let animationFrameId: number;
-
-    const update = () => {
-      animationFrameId = requestAnimationFrame(() => {
-        if (!props.containerRef.current) return;
-        const activeEl = props.containerRef.current.querySelector(props.activeSelector) as HTMLElement;
-        if (!activeEl) {
-          setStyle((prev: any) => ({ ...prev, opacity: 0 }));
-          return;
-        }
-
-        const top = activeEl.offsetTop;
-        const left = activeEl.offsetLeft;
-        const width = activeEl.offsetWidth;
-        const height = activeEl.offsetHeight;
-        const radius = window.getComputedStyle(activeEl).borderRadius;
-
-        setStyle({
-          opacity: 1,
-          transform: `translate(${left}px, ${top}px)`,
-          width: `${width}px`,
-          height: `${height}px`,
-          borderRadius: radius,
-        });
-      });
-    };
-
-    update();
-    const observer = new MutationObserver(update);
-    if (props.containerRef.current) {
-      observer.observe(props.containerRef.current, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
-    }
-    window.addEventListener("resize", update);
-
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-      observer.disconnect();
-      window.removeEventListener("resize", update);
-    };
-  }, props.deps);
-
-  return <div className="magic-indicator" style={style} />;
-}
-
 function MemeMain() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const sidebarRef = useRef<HTMLDivElement>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [images, setImages] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (containerRef && containerRef.current && containerRef.current.parentElement) {
-      containerRef.current.parentElement.style.height = "100%";
-      containerRef.current.parentElement.style.display = "flex";
-      containerRef.current.parentElement.style.flexDirection = "column";
-      
-      const pane = containerRef.current.closest('.plugin-workbench-pane') as HTMLElement;
-      if (pane) {
-        pane.style.display = "flex";
-        pane.style.flexDirection = "column";
-      }
-    }
-  }, []);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     void api("/api/dashboard/meme/categories").then((data: any) => {
@@ -96,7 +33,11 @@ function MemeMain() {
       if (data.categories?.length > 0) {
         setSelectedTag(data.categories[0].tag);
       }
-    }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "分类读取失败"));
+      setLoading(false);
+    }, (reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : "分类读取失败");
+      setLoading(false);
+    });
   }, []);
 
   useEffect(() => {
@@ -110,25 +51,27 @@ function MemeMain() {
   }, [selectedTag]);
 
   return (
-    <div ref={containerRef} className="meme-dashboard">
-      {/* Sidebar: Categories */}
-      <div ref={sidebarRef} className="meme-dashboard__sidebar">
-        <h3 className={ui.cx.label} style={{ marginBottom: "10px", paddingLeft: "10px" }}>分类</h3>
-        <MagicIndicator containerRef={sidebarRef} activeSelector=".active" deps={[selectedTag, categories]} />
+    <main className="meme-dashboard" aria-labelledby="meme-dashboard-title">
+      <nav className="meme-dashboard__sidebar" aria-label="表情包分类">
+        <div className="meme-dashboard__sidebar-heading">
+          <h2>分类</h2>
+          <span>{categories.length}</span>
+        </div>
         {categories.map((c) => (
-          <div key={c.tag} className="group" style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+          <div key={c.tag} className="meme-category-row">
             <button
               type="button"
-              className={`session-item ${selectedTag === c.tag ? "active" : ""}`}
-              style={{ display: "flex", flex: 1, justifyContent: "space-between", alignItems: "center", minWidth: 0, opacity: c.enabled ? 1 : 0.5 }}
+              className={`meme-category${selectedTag === c.tag ? " is-active" : ""}`}
               onClick={() => setSelectedTag(c.tag)}
+              aria-current={selectedTag === c.tag ? "page" : undefined}
+              disabled={!c.enabled}
             >
-              <span style={{ fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis" }}>{c.tag}</span>
-              <span className={ui.cx.badge(selectedTag === c.tag ? "accent" : "neutral", { dot: true })}>{c.count}</span>
+              <span><strong>{c.name || c.tag}</strong><small>{c.desc || c.tag}</small></span>
+              <b>{c.count}</b>
             </button>
             <button
               type="button"
-              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+              className="meme-delete"
               onClick={() => {
                 if (confirm(`确定要删除分类 "${c.tag}" 吗？这会永久删除该分类及其所有图片！`)) {
                   void api(`/api/dashboard/meme/categories/${c.tag}`, { method: "DELETE" }).then(() => {
@@ -140,7 +83,6 @@ function MemeMain() {
                   }).catch((err: Error) => alert("删除失败：" + err.message));
                 }
               }}
-              style={{ minWidth: "40px", minHeight: "40px", padding: "0 4px", color: "var(--ak-color-status-error)" }}
               aria-label={`删除分类 ${c.tag}`}
               title="删除分类"
             >
@@ -148,29 +90,29 @@ function MemeMain() {
             </button>
           </div>
         ))}
-      </div>
+        {!loading && categories.length === 0 && <p className="meme-dashboard__nav-empty">还没有分类。</p>}
+      </nav>
 
-      {/* Main Area: Gallery */}
-      <div className="meme-dashboard__gallery">
+      <section className="meme-dashboard__gallery">
         <div className="meme-dashboard__header">
           <div>
-            <h2 style={{ fontSize: "24px", fontWeight: "600", color: "var(--ak-color-text-primary)", marginBottom: "4px" }}>
+            <p>表情包库</p>
+            <h1 id="meme-dashboard-title">
               {selectedTag ? categories.find((c) => c.tag === selectedTag)?.name || selectedTag : "选择一个分类"}
-            </h2>
-            <div className={ui.cx.label} style={{ opacity: 0.7 }}>
+            </h1>
+            <div className="meme-dashboard__description">
               {selectedTag ? categories.find((c) => c.tag === selectedTag)?.desc : ""}
             </div>
           </div>
-          <span className={ui.cx.badge("neutral")}>{images.length} 张图片</span>
+          <span className="meme-dashboard__total">{images.length} 张图片</span>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: "20px", paddingBottom: "40px" }}>
+        <div className="meme-grid" aria-live="polite">
           {images.map(img => (
-            <div key={img} className={`${ui.cx.tile} group`} style={{ padding: "10px", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", transition: "transform 0.15s", cursor: "pointer", position: "relative" }} onMouseOver={(e) => (e.currentTarget.style.transform = "scale(1.02)")} onMouseOut={(e) => (e.currentTarget.style.transform = "scale(1)")}>
+            <figure key={img} className="meme-item">
               <button
                 type="button"
-                className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                style={{ position: "absolute", top: "4px", right: "4px", zIndex: 10, minWidth: "40px", minHeight: "40px", background: "var(--ak-color-bg-surface-low)", border: "1px solid var(--ak-color-border-default)", borderRadius: "4px", padding: "2px 6px", color: "var(--ak-color-status-error)" }}
+                className="meme-item__delete"
                 onClick={(e) => {
                   e.stopPropagation();
                   if (confirm(`确定要删除图片 "${img}" 吗？`)) {
@@ -185,35 +127,38 @@ function MemeMain() {
               >
                 ✕
               </button>
-              <div style={{ height: "160px", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "var(--ak-color-bg-surface-low)", borderRadius: "8px", overflow: "hidden" }}>
-                <img src={`/api/dashboard/meme/media/${selectedTag}/${img}`} alt={img} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} loading="lazy" />
+              <div className="meme-item__preview">
+                <img src={`/api/dashboard/meme/media/${selectedTag}/${img}`} alt="" loading="lazy" />
               </div>
-              <div className={ui.cx.mono} style={{ fontSize: "11px", wordBreak: "break-all", textAlign: "center", width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <figcaption title={img}>
                 {img}
-              </div>
-            </div>
+              </figcaption>
+            </figure>
           ))}
-          {images.length === 0 && selectedTag && (
-            <div style={{ padding: "40px", textAlign: "center", color: "var(--ak-color-text-muted)", gridColumn: "1 / -1" }}>
-              该类别下暂无表情包图片
+          {loading && <div className="meme-state" role="status">正在读取表情包分类…</div>}
+          {!loading && !error && images.length === 0 && selectedTag && (
+            <div className="meme-state">
+              <strong>这个分类还没有图片</strong>
+              <span>通过 Meme 插件导入图片后会显示在这里。</span>
             </div>
           )}
           {error && (
-            <div role="alert" style={{ padding: "20px", color: "var(--ak-color-status-error)", gridColumn: "1 / -1" }}>
-              表情包界面加载失败：{error}
+            <div className="meme-state is-error" role="alert">
+              <strong>无法加载表情包</strong>
+              <span>{error}</span>
             </div>
           )}
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }
 
 window.AkashicDashboard.registerPlugin({
   id: "meme",
   label: "Meme 表情包",
-  viewLabel: "meme",
-  layout: "workbench", // This uses the full-page layout without the default table
+  viewLabel: "表情包",
+  layout: "workbench",
   
   async getCount(): Promise<number | null> {
     try {
