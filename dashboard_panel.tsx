@@ -144,7 +144,7 @@ function MemeMain() {
                     }).catch((err: any) => alert("删除失败：" + err.message));
                   }
                 }}
-                style={{ padding: "0 4px", color: "var(--color-danger)" }}
+                style={{ padding: "0 4px", color: "var(--ak-color-status-error)" }}
                 title="删除分类"
               >
                 ✕
@@ -173,7 +173,7 @@ function MemeMain() {
             <div key={img} className={`${ui.cx.tile} group`} style={{ padding: "10px", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", transition: "transform 0.15s", cursor: "pointer", position: "relative" }} onMouseOver={(e) => (e.currentTarget.style.transform = "scale(1.02)")} onMouseOut={(e) => (e.currentTarget.style.transform = "scale(1)")}>
               <div
                 className="opacity-0 group-hover:opacity-100 transition-opacity"
-                style={{ position: "absolute", top: "4px", right: "4px", zIndex: 10, background: "rgba(0,0,0,0.6)", borderRadius: "4px", padding: "2px 6px", color: "#ff4d4f" }}
+                style={{ position: "absolute", top: "4px", right: "4px", zIndex: 10, background: "rgba(0,0,0,0.6)", borderRadius: "4px", padding: "2px 6px", color: "var(--ak-color-status-error)" }}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (confirm(`确定要删除图片 "${img}" 吗？`)) {
