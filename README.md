@@ -8,11 +8,12 @@
 
 | 接入方式 | 阶段 |
 |---|---|
-| v3 `PROMPT_RENDER_EVENT` | 注入表情包目录说明 |
-| v3 `AFTER_REASONING_PREPROCESS_EVENT` | 解析 meme 标签，附加媒体 |
-| `PLUGIN_ASSETS` Service | 注册 `skills/` 与 `dashboard.py` |
+| v3 `PROMPT_RENDER_AFTER_EVENT_BUS` | legacy Prompt 事件后注入表情包目录说明 |
+| v3 `AFTER_REASONING_BEFORE_EVENT_BUS` | legacy AfterReasoning 事件前解析 meme 标签 |
+| v3 `SKILLS` Service | 注册 `skills/` catalog |
+| v3 `UI_SLOTS` Service | 注册 `dashboard.py` backend |
 
-插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
+插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator`，再从独立的 Skills、UI Slots 与 typed event 能力登记接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
 
 ---
 

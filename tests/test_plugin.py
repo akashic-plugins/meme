@@ -12,22 +12,26 @@ import sys
 import pytest
 
 from agent.core.response_parser import ResponseMetadata
-from agent.lifecycle.composition import (
-    AFTER_REASONING_CLEANUP_EVENT,
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
-)
 from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
 from agent.plugin_composition import (
-    PLUGIN_ASSETS,
+    SKILLS,
+    UI_SLOTS,
     CompositionRoot,
-    PluginAssets,
+    Context,
     PluginRuntime,
+    PluginSkills,
+    PluginUiSlots,
 )
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.context import PluginContext, PluginKVStore
-from agent.plugins.dashboard_host import PluginDashboardHost
+from agent.plugins.dashboard_host import DashboardBinding, PluginDashboardHost
 from agent.plugins.manager import PluginManager
+from agent.plugins.scope import PluginScope, ScopedEventBus
+from agent.turn_events.after_reasoning import (
+    AFTER_REASONING_BEFORE_EVENT_BUS,
+    AFTER_REASONING_BEFORE_PERSIST,
+)
+from agent.turn_events.prompt_render import PROMPT_RENDER_AFTER_EVENT_BUS
 from bus.event_bus import EventBus
 from runtime import MemeCatalog, MemeDecorator
 
@@ -55,6 +59,17 @@ apply = _meme_plugin_module.apply
 inject = _meme_plugin_module.inject
 
 
+def _copy_ignore():
+    return shutil.ignore_patterns(
+        ".akashic-core",
+        ".citation",
+        ".git",
+        ".plugin-contracts",
+        ".pytest_cache",
+        "__pycache__",
+    )
+
+
 def _write_meme_workspace(workspace: Path) -> Path:
     memes = workspace / "memes"
     (memes / "shy").mkdir(parents=True)
@@ -73,15 +88,17 @@ def _write_meme_workspace(workspace: Path) -> Path:
 async def _make_plugin(tmp_path: Path) -> MemePlugin:
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir(parents=True)
+    scope = PluginScope("meme")
     plugin = MemePlugin()
     plugin.context = PluginContext(
-        event_bus=None,
+        event_bus=ScopedEventBus(EventBus(), scope),
         tool_registry=None,
         plugin_id="meme",
         plugin_dir=plugin_dir,
         data_dir=tmp_path,
         kv_store=PluginKVStore(plugin_dir / ".kv.json"),
         workspace=tmp_path,
+        scope=scope,
     )
     await plugin.prepare()
     return plugin
@@ -201,13 +218,15 @@ async def test_meme_plugin_ignores_code_tag(tmp_path: Path) -> None:
 async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
     image = _write_meme_workspace(tmp_path)
     legacy = await _make_plugin(tmp_path)
-    ComposablePlugin.from_module(_meme_plugin_module)
+    _ = ComposablePlugin.from_module(_meme_plugin_module)
     root = CompositionRoot("meme-parity")
-    assets = PluginAssets()
-    _ = await root.context.provide(PLUGIN_ASSETS, assets)
+    skills = PluginSkills()
+    ui_slots = PluginUiSlots()
+    _ = await root.context.provide(SKILLS, skills)
+    _ = await root.context.provide(UI_SLOTS, ui_slots)
     _ = await root.context.provide(CITATION_PROTOCOL_SERVICE, object())
 
-    async def mount(ctx) -> None:
+    async def mount(ctx: Context) -> None:
         await apply(ctx, object())
 
     plugin_dir = Path(__file__).parents[1]
@@ -223,10 +242,12 @@ async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
             config=object(),
         ),
     )
-    assert root.receipt().ready is True
-    declared = assets.freeze()["meme"]
-    assert declared.skill_roots == (plugin_dir / "skills",)
-    assert declared.dashboard_module == plugin_dir / "dashboard.py"
+    receipt = root.receipt()
+    assert receipt.ready is True
+    assert receipt.writes == ()
+    assert receipt.external_effects == ()
+    assert skills.freeze()["meme"].skill_roots == (plugin_dir / "skills",)
+    assert ui_slots.freeze()["meme"].dashboard_module == plugin_dir / "dashboard.py"
 
     legacy_prompt = PromptRenderCtx(
         session_key="telegram:1",
@@ -257,7 +278,7 @@ async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
         disabled_sections=set(),
         turn_injection_prompt="",
     )
-    await root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
+    _ = await root.context.serial(PROMPT_RENDER_AFTER_EVENT_BUS, v3_prompt)
     assert v3_prompt.system_sections_bottom == legacy_prompt.system_sections_bottom
 
     legacy_answer = AfterReasoningCtx(
@@ -285,16 +306,20 @@ async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
         context_retry={},
         reply="好的 <meme:shy>",
     )
-    await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, v3_answer)
+    _ = await root.context.serial(AFTER_REASONING_BEFORE_EVENT_BUS, v3_answer)
 
     assert v3_answer.reply == legacy_answer.reply == "好的"
     assert v3_answer.media == legacy_answer.media == [str(image)]
     assert v3_answer.meme_tag == legacy_answer.meme_tag == "shy"
     await root.dispose()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
 
 
 @pytest.mark.asyncio
-async def test_v3_plugin_loads_assets_through_real_manager(tmp_path: Path) -> None:
+async def test_v3_plugin_loads_capabilities_through_real_manager(
+    tmp_path: Path,
+) -> None:
     _write_meme_workspace(tmp_path / "workspace")
     plugin_home = tmp_path / "plugins"
     citation_dir = plugin_home / "citation"
@@ -309,10 +334,10 @@ async def test_v3_plugin_loads_assets_through_real_manager(tmp_path: Path) -> No
         "    await ctx.provide(SERVICE, object())\n",
         encoding="utf-8",
     )
-    shutil.copytree(
+    _ = shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "meme",
-        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"),
+        ignore=_copy_ignore(),
     )
     workspace = tmp_path / "workspace"
     manager = PluginManager(
@@ -335,6 +360,10 @@ async def test_v3_plugin_loads_assets_through_real_manager(tmp_path: Path) -> No
     )
     assert snapshot.plugin_skill_index is not None
     assert "meme-manage" in snapshot.plugin_skill_index.records
+    assert snapshot.composition_topology is not None
+    assert "core.skills" in snapshot.composition_topology.services
+    assert "core.ui_slots" in snapshot.composition_topology.services
+    assert "core.plugin_assets" not in snapshot.composition_topology.services
     dashboard = PluginDashboardHost(
         workspace=workspace,
         memory_admin=object(),
@@ -342,10 +371,15 @@ async def test_v3_plugin_loads_assets_through_real_manager(tmp_path: Path) -> No
         core_routes=(),
     )
     dashboard.prepare_snapshot(snapshot)
-    assert tuple(binding.plugin_id for binding in snapshot.dashboard_bindings) == (
-        "meme",
-    )
+    assert len(snapshot.dashboard_bindings) == 1
+    binding = snapshot.dashboard_bindings[0]
+    assert isinstance(binding, DashboardBinding)
+    assert binding.plugin_id == "meme"
+    root = snapshot.composition_root
+    assert root is not None
     await manager.terminate_all()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
 
 
 @pytest.mark.asyncio
@@ -405,15 +439,15 @@ async def test_citation_meme_cross_repository_parity(tmp_path: Path) -> None:
     await citation_module.ProtocolTagCleanupModule().run(legacy_frame)
 
     plugin_home = tmp_path / "plugins"
-    shutil.copytree(
+    _ = shutil.copytree(
         citation_root,
         plugin_home / "citation",
-        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"),
+        ignore=_copy_ignore(),
     )
-    shutil.copytree(
+    _ = shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "meme",
-        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"),
+        ignore=_copy_ignore(),
     )
     manager = PluginManager(
         plugin_dirs=[plugin_home],
@@ -439,7 +473,10 @@ async def test_citation_meme_cross_repository_parity(tmp_path: Path) -> None:
         disabled_sections=set(),
         turn_injection_prompt="",
     )
-    await snapshot.composition_root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
+    _ = await snapshot.composition_root.context.serial(
+        PROMPT_RENDER_AFTER_EVENT_BUS,
+        v3_prompt,
+    )
     v3_answer = AfterReasoningCtx(
         session_key="telegram:1",
         channel="telegram",
@@ -452,12 +489,12 @@ async def test_citation_meme_cross_repository_parity(tmp_path: Path) -> None:
         context_retry={},
         reply=reply,
     )
-    await snapshot.composition_root.context.serial(
-        AFTER_REASONING_PREPROCESS_EVENT,
+    _ = await snapshot.composition_root.context.serial(
+        AFTER_REASONING_BEFORE_EVENT_BUS,
         v3_answer,
     )
-    await snapshot.composition_root.context.serial(
-        AFTER_REASONING_CLEANUP_EVENT,
+    _ = await snapshot.composition_root.context.serial(
+        AFTER_REASONING_BEFORE_PERSIST,
         v3_answer,
     )
 

@@ -4,18 +4,17 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
-from agent.lifecycle.composition import (
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
-)
 from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
 from agent.plugin_composition import (
-    PLUGIN_ASSETS,
+    SKILLS,
+    UI_SLOTS,
     Context,
     ServiceKey,
 )
 from agent.plugins import Plugin, on_after_reasoning
 from agent.prompting import PromptSectionRender
+from agent.turn_events.after_reasoning import AFTER_REASONING_BEFORE_EVENT_BUS
+from agent.turn_events.prompt_render import PROMPT_RENDER_AFTER_EVENT_BUS
 from .runtime import MemeCatalog, MemeDecorator
 
 _CTX_SLOT = "prompt:ctx"
@@ -69,7 +68,8 @@ name = "meme"
 version = "1.0.0"
 inject: tuple[ServiceKey[object], ...] = (
     CITATION_PROTOCOL_SERVICE,
-    PLUGIN_ASSETS,
+    SKILLS,
+    UI_SLOTS,
 )
 
 
@@ -81,19 +81,21 @@ async def apply(ctx: Context, config: object) -> None:
     catalog = MemeCatalog(ctx.runtime.workspace / "memes")
     decorator = MemeDecorator(catalog)
 
-    # 2. Assets and lifecycle behavior are reversible Fiber effects.
-    assets = ctx.require(PLUGIN_ASSETS)
-    await assets.register_skill(ctx, "skills")
-    await assets.register_dashboard(ctx, "dashboard.py")
+    # 2. Static capabilities remain separate reversible Fiber effects.
+    skills = ctx.require(SKILLS)
+    _ = await skills.register(ctx, "skills")
+    ui_slots = ctx.require(UI_SLOTS)
+    _ = await ui_slots.register_dashboard(ctx, "dashboard.py")
 
+    # 3. Turn behavior remains plugin-owned and ordered by typed events.
     def prompt_listener(prompt: PromptRenderCtx) -> None:
         append_meme_prompt(prompt, catalog)
 
     def answer_listener(answer: AfterReasoningCtx) -> None:
         decorate_meme_ctx(answer, decorator)
 
-    await ctx.on(PROMPT_RENDER_EVENT, prompt_listener)
-    await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, answer_listener)
+    _ = await ctx.on(PROMPT_RENDER_AFTER_EVENT_BUS, prompt_listener)
+    _ = await ctx.on(AFTER_REASONING_BEFORE_EVENT_BUS, answer_listener)
 
 
 class MemePlugin(Plugin):
