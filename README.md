@@ -8,14 +8,17 @@
 
 | 接入方式 | 阶段 |
 |---|---|
-| `prompt_render_modules()` | `prompt_render.emit` 之后——注入表情包目录说明 |
-| `@on_after_reasoning()` | AfterReasoning GATE——解析 meme 标签，附加媒体 |
+| v3 `PROMPT_RENDER_EVENT` | 注入表情包目录说明 |
+| v3 `AFTER_REASONING_PREPROCESS_EVENT` | 解析 meme 标签，附加媒体 |
+| `PLUGIN_ASSETS` Service | 注册 `skills/` 与 `dashboard.py` |
+
+插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
 
 ---
 
 ## 运作逻辑
 
-### 1. 初始化（initialize）
+### 1. 初始化
 
 从工作区路径（`workspace/memes/`）加载 `manifest.json`，构建 `MemeCatalog` 和 `MemeDecorator` 实例。`MemeCatalog` 按需检测 manifest 的 mtime，变动时自动热重载，不需要重启。
 
