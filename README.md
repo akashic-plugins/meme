@@ -10,9 +10,11 @@
 |---|---|
 | v3 `PROMPT_RENDER_EVENT` | 注入表情包目录说明 |
 | v3 `AFTER_REASONING_PREPROCESS_EVENT` | 解析 meme 标签，附加媒体 |
-| `PLUGIN_ASSETS` Service | 注册 `skills/` 与 `dashboard.py` |
+| `skill_roots = ("skills",)` | 声明管理 Skill |
+| `dashboard_module = "dashboard.py"` | 声明 v3 Dashboard |
+| `workspace_roots = ("memes",)` | 取得 Core 分配的表情包资产根 |
 
-插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
+插件通过模块命名导出声明静态贡献，通过 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。Core 只分配生命周期、依赖顺序与 workspace root；Meme 的目录结构、随机选图和 Dashboard 仍由插件拥有。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
 
 ---
 

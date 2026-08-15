@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from .plugin import _workspace
+from agent.plugin_composition import DashboardContext
 from .runtime import MemeCatalog
 
-def register(app: FastAPI, plugin_dir: Path, workspace: Path) -> None:
-    memes_dir = _workspace(plugin_dir, workspace) / "memes"
+
+def register(app: FastAPI, context: DashboardContext) -> None:
+    memes_dir = context.workspace_root("memes")
     catalog = MemeCatalog(memes_dir)
 
     @app.get("/api/dashboard/meme/categories")

@@ -9,11 +9,7 @@ from agent.lifecycle.composition import (
     PROMPT_RENDER_EVENT,
 )
 from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
-from agent.plugin_composition import (
-    PLUGIN_ASSETS,
-    Context,
-    ServiceKey,
-)
+from agent.plugin_composition import Context, ServiceKey
 from agent.plugins import Plugin, on_after_reasoning
 from agent.prompting import PromptSectionRender
 from .runtime import MemeCatalog, MemeDecorator
@@ -67,10 +63,10 @@ class MemePromptModule:
 api_version = 3
 name = "meme"
 version = "1.0.0"
-inject: tuple[ServiceKey[object], ...] = (
-    CITATION_PROTOCOL_SERVICE,
-    PLUGIN_ASSETS,
-)
+inject: tuple[ServiceKey[object], ...] = (CITATION_PROTOCOL_SERVICE,)
+skill_roots = ("skills",)
+dashboard_module = "dashboard.py"
+workspace_roots = ("memes",)
 
 
 async def apply(ctx: Context, config: object) -> None:
@@ -78,22 +74,18 @@ async def apply(ctx: Context, config: object) -> None:
 
     # 1. Domain state remains plugin-owned and reads the assigned workspace.
     _ = config
-    catalog = MemeCatalog(ctx.runtime.workspace / "memes")
+    catalog = MemeCatalog(ctx.workspace_root("memes"))
     decorator = MemeDecorator(catalog)
 
-    # 2. Assets and lifecycle behavior are reversible Fiber effects.
-    assets = ctx.require(PLUGIN_ASSETS)
-    await assets.register_skill(ctx, "skills")
-    await assets.register_dashboard(ctx, "dashboard.py")
-
+    # 2. Lifecycle behavior is owned by reversible Fiber effects.
     def prompt_listener(prompt: PromptRenderCtx) -> None:
         append_meme_prompt(prompt, catalog)
 
     def answer_listener(answer: AfterReasoningCtx) -> None:
         decorate_meme_ctx(answer, decorator)
 
-    await ctx.on(PROMPT_RENDER_EVENT, prompt_listener)
-    await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, answer_listener)
+    _ = await ctx.on(PROMPT_RENDER_EVENT, prompt_listener)
+    _ = await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, answer_listener)
 
 
 class MemePlugin(Plugin):
