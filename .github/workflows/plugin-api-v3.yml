@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: akashic-plugins/citation
-          ref: a9abeb31c25458b8e799dc6aae25d3e83b912c83
+          ref: b82453cd1eae71da8d25eb31aada30b01c659b54
           path: .citation
       - uses: actions/setup-python@v5
         with:

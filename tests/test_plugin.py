@@ -48,6 +48,21 @@ def _load_meme_plugin_module():
     return module
 
 
+def _load_exact_citation_module(citation_root: Path):
+    path = citation_root / "plugin.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_exact_citation_plugin",
+        path,
+        submodule_search_locations=[str(path.parent)],
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 _meme_plugin_module = _load_meme_plugin_module()
 CITATION_PROTOCOL_SERVICE = _meme_plugin_module.CITATION_PROTOCOL_SERVICE
 apply = _meme_plugin_module.apply
@@ -369,6 +384,8 @@ async def test_citation_meme_cross_repository_v3_behavior(tmp_path: Path) -> Non
             "AKASHIC_CITATION_ROOT 必须指向 exact-commit Citation checkout"
         )
     citation_root = Path(raw_citation_root)
+    citation_module = _load_exact_citation_module(citation_root)
+    assert not hasattr(citation_module, "CitationPlugin")
 
     workspace = tmp_path / "workspace"
     image = _write_meme_workspace(workspace)
