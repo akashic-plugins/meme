@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import importlib
 import importlib.util
+import json
 import os
-import shutil
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from pathlib import Path
+import shutil
 import sys
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -28,10 +27,8 @@ from agent.plugin_composition import (
     PluginRuntime,
 )
 from agent.plugins.composable import ComposablePlugin
-from agent.plugins.context import PluginContext, PluginKVStore
 from agent.plugins.dashboard_host import DashboardBinding, PluginDashboardHost
 from agent.plugins.manager import PluginManager
-from agent.plugins.scope import PluginScope, ScopedEventBus
 from bus.event_bus import EventBus
 from runtime import MemeCatalog, MemeDecorator
 
@@ -52,10 +49,9 @@ def _load_meme_plugin_module():
 
 
 _meme_plugin_module = _load_meme_plugin_module()
-MemePlugin = _meme_plugin_module.MemePlugin
-MemePromptModule = _meme_plugin_module.MemePromptModule
 CITATION_PROTOCOL_SERVICE = _meme_plugin_module.CITATION_PROTOCOL_SERVICE
 apply = _meme_plugin_module.apply
+decorate_meme_ctx = _meme_plugin_module.decorate_meme_ctx
 inject = _meme_plugin_module.inject
 
 
@@ -85,27 +81,39 @@ def _write_meme_workspace(workspace: Path) -> Path:
     return image
 
 
-async def _make_plugin(tmp_path: Path) -> MemePlugin:
-    plugin_dir = tmp_path / "plugin"
-    plugin_dir.mkdir(parents=True)
-    scope = PluginScope("meme")
-    plugin = MemePlugin()
-    plugin.context = PluginContext(
-        event_bus=ScopedEventBus(EventBus(), scope),
-        tool_registry=None,
-        plugin_id="meme",
-        plugin_dir=plugin_dir,
-        data_dir=tmp_path,
-        kv_store=PluginKVStore(plugin_dir / ".kv.json"),
-        workspace=tmp_path,
-        scope=scope,
+def _prompt_ctx() -> PromptRenderCtx:
+    return PromptRenderCtx(
+        session_key="webui:1",
+        channel="webui",
+        chat_id="1",
+        content="你好",
+        media=None,
+        timestamp=datetime.now(timezone.utc),
+        history=[],
+        skill_names=[],
+        retrieved_memory_block="",
+        disabled_sections=set(),
+        turn_injection_prompt="",
     )
-    await plugin.prepare()
-    return plugin
+
+
+def _answer_ctx(reply: str) -> AfterReasoningCtx:
+    return AfterReasoningCtx(
+        session_key="webui:1",
+        channel="webui",
+        chat_id="1",
+        tools_used=(),
+        thinking=None,
+        response_metadata=ResponseMetadata(raw_text=reply),
+        streamed=False,
+        tool_chain=(),
+        context_retry={},
+        reply=reply,
+    )
 
 
 def test_catalog_builds_prompt_block(tmp_path: Path) -> None:
-    _write_meme_workspace(tmp_path)
+    _ = _write_meme_workspace(tmp_path)
     block = MemeCatalog(tmp_path / "memes").build_prompt_block()
     assert block is not None
     assert "<meme:shy>" in block
@@ -122,120 +130,55 @@ def test_decorator_picks_image_for_tag(tmp_path: Path) -> None:
     assert result.media == [str(image)]
 
 
-@pytest.mark.asyncio
-async def test_meme_prompt_module_injects_bottom_section(tmp_path: Path) -> None:
-    _write_meme_workspace(tmp_path)
-    plugin = await _make_plugin(tmp_path)
-    module = plugin.prompt_render_modules()[0]
-    assert isinstance(module, MemePromptModule)
-    ctx = PromptRenderCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=datetime.now(timezone.utc),
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-    frame = SimpleNamespace(slots={"prompt:ctx": ctx})
-    await module.run(frame)
-    assert ctx.system_sections_bottom[0].name == "memes"
-
-
-@pytest.mark.asyncio
-async def test_meme_plugin_decorates_after_reasoning(tmp_path: Path) -> None:
+def test_decorate_meme_ctx_updates_answer_metadata(tmp_path: Path) -> None:
     image = _write_meme_workspace(tmp_path)
-    plugin = await _make_plugin(tmp_path)
-    ctx = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text="好的 <meme:shy>"),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="好的 <meme:shy>",
-    )
-    out = await plugin.decorate_meme(ctx)
-    assert out.reply == "好的"
-    assert out.media == [str(image)]
-    assert out.meme_tag == "shy"
+    ctx = _answer_ctx("好的 <meme:shy>")
+    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
+    assert ctx.reply == "好的"
+    assert ctx.media == [str(image)]
+    assert ctx.meme_tag == "shy"
 
 
-@pytest.mark.asyncio
-async def test_meme_plugin_accepts_inline_tag(tmp_path: Path) -> None:
+def test_decorate_meme_ctx_accepts_inline_tag(tmp_path: Path) -> None:
     image = _write_meme_workspace(tmp_path)
-    plugin = await _make_plugin(tmp_path)
-    ctx = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text="快了 <meme:shy>\n\n马上到了"),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="快了 <meme:shy>\n\n马上到了",
-    )
-    out = await plugin.decorate_meme(ctx)
-    assert out.reply == "快了\n\n马上到了"
-    assert out.media == [str(image)]
-    assert out.meme_tag == "shy"
+    ctx = _answer_ctx("快了 <meme:shy>\n\n马上到了")
+    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
+    assert ctx.reply == "快了\n\n马上到了"
+    assert ctx.media == [str(image)]
+    assert ctx.meme_tag == "shy"
+
+
+def test_decorate_meme_ctx_ignores_code_tag(tmp_path: Path) -> None:
+    _ = _write_meme_workspace(tmp_path)
+    ctx = _answer_ctx("应该是 `<meme:shy>`。\n\n<æm>shy</æm>")
+    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
+    assert ctx.reply == "应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
+    assert ctx.media == []
+    assert ctx.meme_tag is None
 
 
 @pytest.mark.asyncio
-async def test_meme_plugin_ignores_code_tag(tmp_path: Path) -> None:
-    _write_meme_workspace(tmp_path)
-    plugin = await _make_plugin(tmp_path)
-    ctx = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(
-            raw_text="应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
-        ),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="应该是 `<meme:shy>`。\n\n<æm>shy</æm>",
-    )
-    out = await plugin.decorate_meme(ctx)
-    assert out.reply == "应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
-    assert out.media == []
-    assert out.meme_tag is None
-
-
-@pytest.mark.asyncio
-async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
+async def test_v3_named_exports_run_complete_lifecycle_behavior(
+    tmp_path: Path,
+) -> None:
     image = _write_meme_workspace(tmp_path)
-    legacy = await _make_plugin(tmp_path)
     composable = ComposablePlugin.from_module(_meme_plugin_module)
     assert composable.skill_roots == ("skills",)
     assert composable.dashboard_module == "dashboard.py"
     assert composable.workspace_roots == ("memes",)
-    root = CompositionRoot("meme-parity")
+    root = CompositionRoot("meme-v3")
     _ = await root.context.provide(CITATION_PROTOCOL_SERVICE, object())
 
     async def mount(ctx: Context) -> None:
         await apply(ctx, object())
 
-    plugin_dir = Path(__file__).parents[1]
     _ = await root.mount(
         mount,
         name="meme",
         inject=inject,
         runtime=PluginRuntime(
             plugin_id="meme",
-            plugin_dir=plugin_dir,
+            plugin_dir=Path(__file__).parents[1],
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path,
             config=object(),
@@ -247,68 +190,16 @@ async def test_v3_named_exports_match_legacy_behavior(tmp_path: Path) -> None:
     assert receipt.writes == ()
     assert receipt.external_effects == ()
 
-    legacy_prompt = PromptRenderCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=datetime.now(timezone.utc),
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-    await legacy.prompt_render_modules()[0].run(
-        SimpleNamespace(slots={"prompt:ctx": legacy_prompt})
-    )
-    v3_prompt = PromptRenderCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=legacy_prompt.timestamp,
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-    _ = await root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
-    assert v3_prompt.system_sections_bottom == legacy_prompt.system_sections_bottom
+    prompt = _prompt_ctx()
+    _ = await root.context.serial(PROMPT_RENDER_EVENT, prompt)
+    assert [section.name for section in prompt.system_sections_bottom] == ["memes"]
 
-    legacy_answer = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text="好的 <meme:shy>"),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="好的 <meme:shy>",
-    )
-    await legacy.decorate_meme(legacy_answer)
-    v3_answer = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text="好的 <meme:shy>"),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="好的 <meme:shy>",
-    )
-    _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, v3_answer)
+    answer = _answer_ctx("好的 <meme:shy>")
+    _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, answer)
+    assert answer.reply == "好的"
+    assert answer.media == [str(image)]
+    assert answer.meme_tag == "shy"
 
-    assert v3_answer.reply == legacy_answer.reply == "好的"
-    assert v3_answer.media == legacy_answer.media == [str(image)]
-    assert v3_answer.meme_tag == legacy_answer.meme_tag == "shy"
     await root.dispose()
     assert root.receipt().effects == ()
     assert root.topology_view().listeners == ()
@@ -358,32 +249,9 @@ async def test_v3_candidate_reads_only_its_projected_meme_root(
             workspace_roots=("memes",),
         ),
     )
-    prompt = PromptRenderCtx(
-        session_key="webui:1",
-        channel="webui",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=datetime.now(timezone.utc),
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
+    prompt = _prompt_ctx()
     _ = await root.context.serial(PROMPT_RENDER_EVENT, prompt)
-    answer = AfterReasoningCtx(
-        session_key="webui:1",
-        channel="webui",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text="好的 <meme:shy>"),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply="好的 <meme:shy>",
-    )
+    answer = _answer_ctx("好的 <meme:shy>")
     _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, answer)
 
     dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
@@ -424,7 +292,7 @@ async def test_v3_candidate_reads_only_its_projected_meme_root(
 async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
     tmp_path: Path,
 ) -> None:
-    _write_meme_workspace(tmp_path / "workspace")
+    _ = _write_meme_workspace(tmp_path / "workspace")
     plugin_home = tmp_path / "plugins"
     citation_dir = plugin_home / "citation"
     citation_dir.mkdir(parents=True)
@@ -465,6 +333,7 @@ async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
     assert generation.instance.workspace_roots == ("memes",)
     assert snapshot.plugin_skill_index is not None
     assert "meme-manage" in snapshot.plugin_skill_index.records
+
     dashboard = PluginDashboardHost(
         workspace=workspace,
         memory_admin=object(),
@@ -484,6 +353,7 @@ async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
         if route.path == "/api/dashboard/meme/categories"
     )()
     assert categories["categories"][0]["tag"] == "shy"
+
     root = snapshot.composition_root
     assert root is not None
     await manager.terminate_all()
@@ -492,63 +362,16 @@ async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
 
 
 @pytest.mark.asyncio
-async def test_citation_meme_cross_repository_parity(tmp_path: Path) -> None:
+async def test_citation_meme_cross_repository_v3_behavior(tmp_path: Path) -> None:
     raw_citation_root = os.environ.get("AKASHIC_CITATION_ROOT", "").strip()
     if not raw_citation_root:
         raise RuntimeError(
             "AKASHIC_CITATION_ROOT 必须指向 exact-commit Citation checkout"
         )
     citation_root = Path(raw_citation_root)
-    citation_spec = importlib.util.spec_from_file_location(
-        "test_citation_plugin",
-        citation_root / "plugin.py",
-    )
-    if citation_spec is None or citation_spec.loader is None:
-        raise ImportError(str(citation_root / "plugin.py"))
-    citation_module = importlib.util.module_from_spec(citation_spec)
-    sys.modules[citation_spec.name] = citation_module
-    citation_spec.loader.exec_module(citation_module)
 
     workspace = tmp_path / "workspace"
     image = _write_meme_workspace(workspace)
-    legacy_meme = await _make_plugin(workspace)
-    legacy_prompt = PromptRenderCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=datetime.now(timezone.utc),
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-    await citation_module.CitationPromptModule().run(
-        SimpleNamespace(slots={"prompt:ctx": legacy_prompt})
-    )
-    await legacy_meme.prompt_render_modules()[0].run(
-        SimpleNamespace(slots={"prompt:ctx": legacy_prompt})
-    )
-    reply = "答复正文\n§cited:[mem_1]§ <meme:shy>"
-    legacy_answer = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text=reply),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply=reply,
-    )
-    legacy_frame = SimpleNamespace(slots={"reasoning:ctx": legacy_answer})
-    await citation_module.CitationAfterReasoningModule().run(legacy_frame)
-    await legacy_meme.decorate_meme(legacy_answer)
-    await citation_module.ProtocolTagCleanupModule().run(legacy_frame)
-
     plugin_home = tmp_path / "plugins"
     _ = shutil.copytree(
         citation_root,
@@ -571,49 +394,27 @@ async def test_citation_meme_cross_repository_parity(tmp_path: Path) -> None:
     snapshot = manager.current_snapshot
     assert snapshot is not None and snapshot.composition_root is not None
 
-    v3_prompt = PromptRenderCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=legacy_prompt.timestamp,
-        history=[],
-        skill_names=[],
-        retrieved_memory_block="",
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-    _ = await snapshot.composition_root.context.serial(
-        PROMPT_RENDER_EVENT,
-        v3_prompt,
-    )
-    v3_answer = AfterReasoningCtx(
-        session_key="telegram:1",
-        channel="telegram",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text=reply),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply=reply,
-    )
+    prompt = _prompt_ctx()
+    _ = await snapshot.composition_root.context.serial(PROMPT_RENDER_EVENT, prompt)
+    answer = _answer_ctx("答复正文\n§cited:[mem_1]§ <meme:shy>")
     _ = await snapshot.composition_root.context.serial(
         AFTER_REASONING_PREPROCESS_EVENT,
-        v3_answer,
+        answer,
     )
     _ = await snapshot.composition_root.context.serial(
         AFTER_REASONING_CLEANUP_EVENT,
-        v3_answer,
+        answer,
     )
 
-    assert v3_prompt.system_sections_bottom == legacy_prompt.system_sections_bottom
-    assert v3_answer.reply == legacy_answer.reply == "答复正文"
-    assert v3_answer.persist_assistant_metadata["cited_memory_ids"] == (
-        legacy_frame.slots["persist:assistant:cited_memory_ids"]
-    )
-    assert v3_answer.media == legacy_answer.media == [str(image)]
-    assert v3_answer.meme_tag == legacy_answer.meme_tag == "shy"
+    assert [section.name for section in prompt.system_sections_bottom] == [
+        "citation_protocol",
+        "memes",
+    ]
+    assert answer.reply == "答复正文"
+    assert answer.persist_assistant_metadata["cited_memory_ids"] == ["mem_1"]
+    assert answer.media == [str(image)]
+    assert answer.meme_tag == "shy"
+    root = snapshot.composition_root
     await manager.terminate_all()
+    assert root.receipt().effects == ()
+    assert root.topology_view().listeners == ()

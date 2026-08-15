@@ -14,7 +14,7 @@
 | `dashboard_module = "dashboard.py"` | 声明 v3 Dashboard |
 | `workspace_roots = ("memes",)` | 取得 Core 分配的表情包资产根 |
 
-插件通过模块命名导出声明静态贡献，通过 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。Core 只分配生命周期、依赖顺序与 workspace root；Meme 的目录结构、随机选图和 Dashboard 仍由插件拥有。旧 `MemePlugin` 暂时保留，只用于迁移期差分验证。
+插件通过模块命名导出声明静态贡献，通过 `apply(ctx, config)` 自行构建 `MemeCatalog`/`MemeDecorator` 并注册接入点。`citation.protocol` 是硬依赖：Citation 先剥离 cited metadata 并保留 meme tag，Meme 再完成媒体装饰，Citation cleanup 最后清除残留协议标签。Core 只分配生命周期、依赖顺序与 workspace root；Meme 的目录结构、随机选图和 Dashboard 仍由插件拥有。
 
 ---
 
@@ -24,7 +24,7 @@
 
 从工作区路径（`workspace/memes/`）加载 `manifest.json`，构建 `MemeCatalog` 和 `MemeDecorator` 实例。`MemeCatalog` 按需检测 manifest 的 mtime，变动时自动热重载，不需要重启。
 
-### 2. 注入 catalog（MemePromptModule）
+### 2. 注入 catalog
 
 每轮推理前，调用 `catalog.build_prompt_block()` 把启用的表情包类别（名称、描述、别名）拼成文本块，追加到系统 prompt 底部，告知 LLM 可以在回复中嵌入 `<meme:tag>` 标签。如果 catalog 为空则跳过注入。
 
