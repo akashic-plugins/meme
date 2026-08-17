@@ -29,6 +29,7 @@ from agent.plugin_composition import (
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.dashboard_host import DashboardBinding, PluginDashboardHost
 from agent.plugins.manager import PluginManager
+from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 from runtime import MemeCatalog, MemeDecorator
 
@@ -94,6 +95,17 @@ def _write_meme_workspace(workspace: Path) -> Path:
         encoding="utf-8",
     )
     return image
+
+
+def test_static_manifest_matches_v3_module() -> None:
+    manifest = load_static_plugin_manifest(
+        Path(_meme_plugin_module.__file__ or "").resolve().parent
+    )
+
+    assert manifest.name == _meme_plugin_module.name == "meme"
+    assert manifest.version == _meme_plugin_module.version == "1.0.0"
+    assert manifest.api_version == _meme_plugin_module.api_version == 3
+    assert manifest.entrypoint == "plugin.py"
 
 
 def _prompt_ctx() -> PromptRenderCtx:
@@ -350,9 +362,6 @@ async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
     assert "meme-manage" in snapshot.plugin_skill_index.records
 
     dashboard = PluginDashboardHost(
-        workspace=workspace,
-        memory_admin=object(),
-        memory_store=object(),
         core_routes=(),
     )
     dashboard.prepare_snapshot(snapshot)
