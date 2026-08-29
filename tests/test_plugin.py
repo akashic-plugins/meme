@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 
 from agent.core.response_parser import ResponseMetadata
@@ -118,7 +118,6 @@ def _prompt_ctx() -> PromptRenderCtx:
         timestamp=datetime.now(timezone.utc),
         history=[],
         skill_names=[],
-        retrieved_memory_block="",
         disabled_sections=set(),
         turn_injection_prompt="",
     )
@@ -205,6 +204,7 @@ async def test_v3_named_exports_run_complete_lifecycle_behavior(
         inject=inject,
         runtime=PluginRuntime(
             plugin_id="meme",
+            generation_id=root.generation_id,
             plugin_dir=Path(__file__).parents[1],
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path,
@@ -269,6 +269,7 @@ async def test_v3_candidate_reads_only_its_projected_meme_root(
         inject=inject,
         runtime=PluginRuntime(
             plugin_id="meme",
+            generation_id=root.generation_id,
             plugin_dir=Path(__file__).parents[1],
             data_dir=tmp_path / "candidate-data",
             workspace=candidate_workspace,
@@ -313,6 +314,101 @@ async def test_v3_candidate_reads_only_its_projected_meme_root(
     assert root.receipt().writes == ()
     assert root.receipt().external_effects == ()
     await root.dispose()
+
+
+def _meme_dashboard_route(tmp_path: Path, path: str, method: str):
+    dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
+    app = FastAPI()
+    dashboard_module.register(
+        app,
+        DashboardContext(
+            plugin_id="meme",
+            plugin_dir=Path(__file__).parents[1],
+            data_root=tmp_path / "data",
+            validation=True,
+            _workspace_roots=(("memes", tmp_path / "memes"),),
+        ),
+    )
+    return next(
+        route
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        and route.path == path
+        and method in route.methods
+    )
+
+
+def test_dashboard_rejects_media_path_traversal(tmp_path: Path) -> None:
+    media_route = _meme_dashboard_route(
+        tmp_path,
+        "/api/dashboard/meme/media/{tag}/{filename}",
+        "GET",
+    )
+
+    with pytest.raises(HTTPException, match="Invalid category") as raised:
+        media_route.endpoint("..", "secret.png")
+
+    assert raised.value.status_code == 422
+
+
+def test_dashboard_rejects_media_symlink(tmp_path: Path) -> None:
+    image = _write_meme_workspace(tmp_path)
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"secret")
+    image.unlink()
+    image.symlink_to(secret)
+    media_route = _meme_dashboard_route(
+        tmp_path,
+        "/api/dashboard/meme/media/{tag}/{filename}",
+        "GET",
+    )
+
+    with pytest.raises(HTTPException, match="Invalid filename") as raised:
+        media_route.endpoint("shy", "001.png")
+
+    assert raised.value.status_code == 422
+
+
+def test_dashboard_delete_keeps_named_recovery_copy(tmp_path: Path) -> None:
+    image = _write_meme_workspace(tmp_path)
+    delete_route = _meme_dashboard_route(
+        tmp_path,
+        "/api/dashboard/meme/media/{tag}/{filename}",
+        "DELETE",
+    )
+
+    result = delete_route.endpoint("shy", "001.png")
+
+    assert not image.exists()
+    recovery_id = result["recovery_id"]
+    assert recovery_id.startswith("image-")
+    recovered = tmp_path / "memes" / ".trash" / recovery_id / "001.png"
+    assert recovered.read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+
+def test_category_delete_restores_directory_when_manifest_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = _write_meme_workspace(tmp_path)
+    dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
+
+    def fail_write(*_args) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(dashboard_module, "_write_manifest", fail_write)
+    delete_route = _meme_dashboard_route(
+        tmp_path,
+        "/api/dashboard/meme/categories/{tag}",
+        "DELETE",
+    )
+
+    with pytest.raises(HTTPException, match="Failed to preserve deleted category"):
+        delete_route.endpoint("shy")
+
+    assert image.is_file()
+    manifest = json.loads((tmp_path / "memes" / "manifest.json").read_text())
+    assert "shy" in manifest["categories"]
 
 
 @pytest.mark.asyncio
