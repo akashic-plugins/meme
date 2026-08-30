@@ -1,13 +1,24 @@
-/// <reference path="../../types/akashic-dashboard.d.ts" />
 import { useEffect, useState } from "react";
-import { api } from "@akashic/dashboard-ui";
+import { createRoot } from "react-dom/client";
+import "./dashboard_panel.css";
+import type { WebHostContextV1, WebUiDisposer } from "@akashic/web-ui-v1";
+import type { WorkbenchPanelEntry } from "@akashic/workbench-ui-v2";
 
-// The Akashic Dashboard injects itself globally.
-// We declare it here to satisfy TypeScript in our standalone build.
-declare global {
-  interface Window {
-    AkashicDashboard: any;
-  }
+let dashboardRequest: WebHostContextV1["http"]["request"] | null = null;
+
+async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
+  if (!dashboardRequest) throw new Error("Meme 工作台面板未激活");
+  const response = await dashboardRequest(path, init);
+  const body = await response.json() as T & { detail?: unknown; message?: unknown };
+  if (!response.ok) throw new Error(String(body.detail ?? body.message ?? `HTTP ${response.status}`));
+  return body;
+}
+
+async function media(path: string, signal: AbortSignal): Promise<Blob> {
+  if (!dashboardRequest) throw new Error("Meme 工作台面板未激活");
+  const response = await dashboardRequest(path, { signal });
+  if (!response.ok) throw new Error(`图片读取失败：HTTP ${response.status}`);
+  return response.blob();
 }
 
 interface Category {
@@ -27,26 +38,38 @@ function MemeMain() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void api("/api/dashboard/meme/categories").then((data: any) => {
+    const controller = new AbortController();
+    void api("/api/dashboard/meme/categories", { signal: controller.signal }).then((data: any) => {
+      if (controller.signal.aborted) return;
       setCategories(data.categories || []);
       if (data.categories?.length > 0) {
         setSelectedTag(data.categories[0].tag);
       }
       setLoading(false);
     }, (reason: unknown) => {
+      if (controller.signal.aborted) return;
       setError(reason instanceof Error ? reason.message : "分类读取失败");
       setLoading(false);
     });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    if (selectedTag) {
-      void api(`/api/dashboard/meme/images/${selectedTag}`).then((data: any) => {
-        setImages(data.images || []);
-      }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "图片读取失败"));
-    } else {
+    if (!selectedTag) {
       setImages([]);
+      return;
     }
+    const controller = new AbortController();
+    setImages([]);
+    setError(null);
+    void api(`/api/dashboard/meme/images/${selectedTag}`, { signal: controller.signal }).then((data: any) => {
+      if (!controller.signal.aborted) setImages(data.images || []);
+    }, (reason: unknown) => {
+      if (!controller.signal.aborted) {
+        setError(reason instanceof Error ? reason.message : "图片读取失败");
+      }
+    });
+    return () => controller.abort();
   }, [selectedTag]);
 
   return (
@@ -126,9 +149,7 @@ function MemeMain() {
               >
                 ✕
               </button>
-              <div className="meme-item__preview">
-                <img src={`/api/dashboard/meme/media/${selectedTag}/${img}`} alt="" loading="lazy" />
-              </div>
+              <div className="meme-item__preview"><MemeImage tag={selectedTag!} name={img} /></div>
               <figcaption title={img}>
                 {img}
               </figcaption>
@@ -153,21 +174,46 @@ function MemeMain() {
   );
 }
 
-window.AkashicDashboard.registerPlugin({
+function MemeImage({ tag, name }: { tag: string; name: string }) {
+  const [source, setSource] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    void media(`/api/dashboard/meme/media/${tag}/${name}`, controller.signal).then((blob) => {
+      objectUrl = URL.createObjectURL(blob);
+      setSource(objectUrl);
+    }, (reason: unknown) => {
+      if (!controller.signal.aborted) console.error("Meme 图片读取失败", reason);
+    });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [name, tag]);
+
+  return <img src={source ?? undefined} alt="" loading="lazy" />;
+}
+
+const panel = {
   id: "meme",
   label: "Meme 表情包",
   viewLabel: "表情包",
+  order: 50,
   layout: "workbench",
+  rowKey: "id",
+  columns: [],
   
-  async getCount(): Promise<number | null> {
+  async getCount({ signal }: { signal: AbortSignal }): Promise<number | null> {
     try {
-      const data = await api("/api/dashboard/meme/categories");
+      const data = await api("/api/dashboard/meme/categories", { signal });
       let total = 0;
       for (const cat of data.categories || []) {
         total += cat.count;
       }
       return total;
-    } catch {
+    } catch (error) {
+      if (signal.aborted) throw error;
       return null;
     }
   },
@@ -176,5 +222,18 @@ window.AkashicDashboard.registerPlugin({
     return { items: [], total: 0 };
   },
 
-  Main: MemeMain,
-});
+  renderMain(container: HTMLElement): WebUiDisposer {
+    const root = createRoot(container);
+    root.render(<MemeMain />);
+    return () => root.unmount();
+  },
+} satisfies WorkbenchPanelEntry;
+
+export function activate(ctx: WebHostContextV1): WebUiDisposer {
+  dashboardRequest = ctx.http.request;
+  const release = ctx.ui.inject("workbench.panels.v2", (mount) => mount.register(panel));
+  return () => {
+    release();
+    dashboardRequest = null;
+  };
+}
