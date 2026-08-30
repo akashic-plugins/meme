@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
 import "./dashboard_panel.css";
 import type { WebHostContextV1, WebUiDisposer } from "@akashic/web-ui-v1";
 import type { WorkbenchPanelEntry } from "@akashic/workbench-ui-v2";
@@ -221,7 +222,11 @@ const panel = {
     return { items: [], total: 0 };
   },
 
-  Main: MemeMain,
+  renderMain(container: HTMLElement): WebUiDisposer {
+    const root = createRoot(container);
+    root.render(<MemeMain />);
+    return () => root.unmount();
+  },
 } satisfies WorkbenchPanelEntry;
 
 export function activate(ctx: WebHostContextV1): WebUiDisposer {
