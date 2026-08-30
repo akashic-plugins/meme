@@ -103,7 +103,7 @@ def test_static_manifest_matches_v3_module() -> None:
     )
 
     assert manifest.name == _meme_plugin_module.name == "meme"
-    assert manifest.version == _meme_plugin_module.version == "1.0.0"
+    assert manifest.version == _meme_plugin_module.version == "1.0.1"
     assert manifest.api_version == _meme_plugin_module.api_version == 3
     assert manifest.entrypoint == "plugin.py"
 

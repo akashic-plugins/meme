@@ -42,15 +42,15 @@ def decorate_meme_ctx(ctx: AfterReasoningCtx, decorator: MemeDecorator) -> None:
 
 api_version = 3
 name = "meme"
-version = "1.0.0"
+version = "1.0.1"
 inject: tuple[ServiceKey[object], ...] = (CITATION_PROTOCOL_SERVICE,)
 skill_roots = ("skills",)
 dashboard_module = "dashboard.py"
 web_module = "web_module.js"
-web_requires = ("workbench.panels.v1",)
+web_requires = ("workbench.panels.v2",)
 web_provides = ()
 web_contract_digests = {
-    "workbench.panels.v1": "724b282c22c4b3f3a36967ab664c4dfd8bce4257665f99459000306938caf527",
+    "workbench.panels.v2": "17a005a381b362ae25a0499dbf95bf7a2c3ff0bb4e9b415e7357db458de6b5db",
 }
 workspace_roots = ("memes",)
 

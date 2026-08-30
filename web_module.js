@@ -1,200 +1,208 @@
-export function activate(ctx) {
-  return ctx.ui.inject("workbench.panels.v1", (mount) => mount.register({
-    id: "meme",
-    label: "Meme 表情包",
-    order: 40,
-    render(host) {
-      const panel = document.createElement("section");
-      panel.className = "meme-dashboard";
-      panel.innerHTML = `<nav class="meme-dashboard__sidebar" aria-label="表情包分类"><div class="meme-dashboard__sidebar-heading"><h2>分类</h2><span data-category-count>0</span></div><div data-categories></div></nav><section class="meme-dashboard__gallery"><div class="meme-dashboard__header"><div><p>表情包库</p><h1 data-title>选择一个分类</h1><div class="meme-dashboard__description" data-description></div></div><span class="meme-dashboard__total" data-total>0 张图片</span></div><p data-status role="status" aria-live="polite"></p><div class="meme-grid" data-gallery></div></section>`;
-      host.replaceChildren(panel);
-      const categoriesHost = panel.querySelector("[data-categories]");
-      const categoryCount = panel.querySelector("[data-category-count]");
-      const title = panel.querySelector("[data-title]");
-      const description = panel.querySelector("[data-description]");
-      const total = panel.querySelector("[data-total]");
-      const status = panel.querySelector("[data-status]");
-      const gallery = panel.querySelector("[data-gallery]");
-      let categories = [];
-      let selectedTag = "";
-      let catalogRequest = new AbortController();
-      let imageRequest = new AbortController();
-      let mutationRequest = new AbortController();
-      let observer = null;
-      let objectUrls = [];
-      let disposed = false;
-
-      const clearImages = () => {
-        imageRequest.abort();
-        imageRequest = new AbortController();
-        observer?.disconnect();
-        observer = null;
-        for (const url of objectUrls) URL.revokeObjectURL(url);
-        objectUrls = [];
-        gallery.replaceChildren();
-      };
-
-      const loadCategories = async (preferredTag = selectedTag) => {
-        catalogRequest.abort();
-        catalogRequest = new AbortController();
-        const activeRequest = catalogRequest;
-        status.textContent = "正在读取表情包分类…";
-        try {
-          const result = await json(ctx, "/api/dashboard/meme/categories", {}, activeRequest.signal);
-          if (disposed || activeRequest.signal.aborted) return;
-          categories = Array.isArray(result.categories) ? result.categories : [];
-          selectedTag = categories.some((item) => item.tag === preferredTag)
-            ? preferredTag
-            : String(categories[0]?.tag ?? "");
-          renderCategories();
-          if (selectedTag) await loadImages(selectedTag);
-          else {
-            clearImages();
-            title.textContent = "选择一个分类";
-            total.textContent = "0 张图片";
-            status.textContent = "还没有表情包分类。";
-          }
-        } catch (reason) {
-          if (!activeRequest.signal.aborted) showError(status, reason);
-        }
-      };
-
-      const renderCategories = () => {
-        categoryCount.textContent = String(categories.length);
-        categoriesHost.replaceChildren();
-        for (const category of categories) {
-          const row = document.createElement("div");
-          row.className = "meme-category-row";
-          const choose = document.createElement("button");
-          choose.type = "button";
-          choose.className = `meme-category${selectedTag === category.tag ? " is-active" : ""}`;
-          choose.disabled = !category.enabled;
-          choose.setAttribute("aria-current", selectedTag === category.tag ? "page" : "false");
-          choose.innerHTML = `<span><strong>${escapeHtml(category.name || category.tag)}</strong><small>${escapeHtml(category.desc || category.tag)}</small></span><b>${Number(category.count || 0)}</b>`;
-          choose.addEventListener("click", () => {
-            selectedTag = category.tag;
-            renderCategories();
-            void loadImages(category.tag);
-          });
-          const remove = document.createElement("button");
-          remove.type = "button";
-          remove.className = "meme-delete";
-          remove.setAttribute("aria-label", `删除分类 ${category.tag}`);
-          remove.textContent = "×";
-          remove.addEventListener("click", () => void deleteCategory(category));
-          row.append(choose, remove);
-          categoriesHost.append(row);
-        }
-      };
-
-      const loadImages = async (tag) => {
-        clearImages();
-        const activeRequest = imageRequest;
-        const category = categories.find((item) => item.tag === tag);
-        title.textContent = category?.name || tag;
-        description.textContent = category?.desc || "";
-        status.textContent = "正在读取图片…";
-        try {
-          const result = await json(ctx, `/api/dashboard/meme/images/${encodeURIComponent(tag)}`, {}, activeRequest.signal);
-          if (disposed || activeRequest.signal.aborted || tag !== selectedTag) return;
-          const images = Array.isArray(result.images) ? result.images : [];
-          total.textContent = `${images.length} 张图片`;
-          status.textContent = images.length ? "" : "这个分类还没有图片。";
-          observer = new IntersectionObserver((entries) => {
-            for (const entry of entries) {
-              if (!entry.isIntersecting) continue;
-              observer?.unobserve(entry.target);
-              void loadImage(entry.target, tag, activeRequest.signal);
-            }
-          }, {rootMargin: "160px"});
-          for (const filename of images) {
-            const figure = document.createElement("figure");
-            figure.className = "meme-item";
-            figure.dataset.filename = filename;
-            figure.innerHTML = `<button type="button" class="meme-item__delete" aria-label="删除图片 ${escapeHtml(filename)}">×</button><div class="meme-item__preview"><span>载入中</span></div><figcaption title="${escapeHtml(filename)}">${escapeHtml(filename)}</figcaption>`;
-            figure.querySelector("button").addEventListener("click", () => void deleteImage(tag, filename));
-            gallery.append(figure);
-            observer.observe(figure);
-          }
-        } catch (reason) {
-          if (!activeRequest.signal.aborted) showError(status, reason);
-        }
-      };
-
-      const loadImage = async (figure, tag, signal) => {
-        try {
-          const response = await ctx.http.request(`/api/dashboard/meme/media/${encodeURIComponent(tag)}/${encodeURIComponent(figure.dataset.filename)}`, {signal});
-          if (!response.ok) throw new Error(`图片读取失败: HTTP ${response.status}`);
-          const url = URL.createObjectURL(await response.blob());
-          if (disposed || signal.aborted || tag !== selectedTag) {
-            URL.revokeObjectURL(url);
-            return;
-          }
-          objectUrls.push(url);
-          const image = document.createElement("img");
-          image.src = url;
-          image.alt = "";
-          figure.querySelector(".meme-item__preview").replaceChildren(image);
-        } catch (reason) {
-          if (!signal.aborted) figure.querySelector(".meme-item__preview").textContent = reason instanceof Error ? reason.message : String(reason);
-        }
-      };
-
-      const deleteCategory = async (category) => {
-        if (!window.confirm(`确定删除分类“${category.tag}”及其中全部图片吗？此操作无法撤销。`)) return;
-        mutationRequest.abort();
-        mutationRequest = new AbortController();
-        const activeRequest = mutationRequest;
-        try {
-          await json(ctx, `/api/dashboard/meme/categories/${encodeURIComponent(category.tag)}`, {method: "DELETE"}, activeRequest.signal);
-          if (disposed || activeRequest.signal.aborted) return;
-          await loadCategories();
-        } catch (reason) {
-          if (!activeRequest.signal.aborted) showError(status, reason);
-        }
-      };
-
-      const deleteImage = async (tag, filename) => {
-        if (!window.confirm(`确定删除图片“${filename}”吗？此操作无法撤销。`)) return;
-        mutationRequest.abort();
-        mutationRequest = new AbortController();
-        const activeRequest = mutationRequest;
-        try {
-          await json(ctx, `/api/dashboard/meme/media/${encodeURIComponent(tag)}/${encodeURIComponent(filename)}`, {method: "DELETE"}, activeRequest.signal);
-          if (disposed || activeRequest.signal.aborted || tag !== selectedTag) return;
-          const category = categories.find((item) => item.tag === tag);
-          if (category) category.count = Math.max(0, Number(category.count) - 1);
-          renderCategories();
-          await loadImages(tag);
-        } catch (reason) {
-          if (!activeRequest.signal.aborted) showError(status, reason);
-        }
-      };
-
-      void loadCategories();
-      return () => {
-        disposed = true;
-        catalogRequest.abort();
-        mutationRequest.abort();
-        clearImages();
-        host.replaceChildren();
-      };
-    },
-  }));
-}
-
-async function json(ctx, path, init, signal) {
-  const response = await ctx.http.request(path, {...init, signal});
+// dashboard_panel.tsx
+import { useEffect, useState } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
+var dashboardRequest = null;
+async function api(path, init) {
+  if (!dashboardRequest) throw new Error("Meme \u5DE5\u4F5C\u53F0\u9762\u677F\u672A\u6FC0\u6D3B");
+  const response = await dashboardRequest(path, init);
   const body = await response.json();
-  if (!response.ok) throw new Error(body?.detail || body?.message || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(String(body.detail ?? body.message ?? `HTTP ${response.status}`));
   return body;
 }
-
-function showError(target, reason) {
-  target.setAttribute("role", "alert");
-  target.textContent = reason instanceof Error ? reason.message : String(reason);
+async function media(path, signal) {
+  if (!dashboardRequest) throw new Error("Meme \u5DE5\u4F5C\u53F0\u9762\u677F\u672A\u6FC0\u6D3B");
+  const response = await dashboardRequest(path, { signal });
+  if (!response.ok) throw new Error(`\u56FE\u7247\u8BFB\u53D6\u5931\u8D25\uFF1AHTTP ${response.status}`);
+  return response.blob();
 }
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[character]);
+function MemeMain() {
+  const [categories, setCategories] = useState([]);
+  const [selectedTag, setSelectedTag] = useState(null);
+  const [images, setImages] = useState([]);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    const controller = new AbortController();
+    void api("/api/dashboard/meme/categories", { signal: controller.signal }).then((data) => {
+      if (controller.signal.aborted) return;
+      setCategories(data.categories || []);
+      if (data.categories?.length > 0) {
+        setSelectedTag(data.categories[0].tag);
+      }
+      setLoading(false);
+    }, (reason) => {
+      if (controller.signal.aborted) return;
+      setError(reason instanceof Error ? reason.message : "\u5206\u7C7B\u8BFB\u53D6\u5931\u8D25");
+      setLoading(false);
+    });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    if (!selectedTag) {
+      setImages([]);
+      return;
+    }
+    const controller = new AbortController();
+    setImages([]);
+    setError(null);
+    void api(`/api/dashboard/meme/images/${selectedTag}`, { signal: controller.signal }).then((data) => {
+      if (!controller.signal.aborted) setImages(data.images || []);
+    }, (reason) => {
+      if (!controller.signal.aborted) {
+        setError(reason instanceof Error ? reason.message : "\u56FE\u7247\u8BFB\u53D6\u5931\u8D25");
+      }
+    });
+    return () => controller.abort();
+  }, [selectedTag]);
+  return /* @__PURE__ */ jsxs("main", { className: "meme-dashboard", "aria-labelledby": "meme-dashboard-title", children: [
+    /* @__PURE__ */ jsxs("nav", { className: "meme-dashboard__sidebar", "aria-label": "\u8868\u60C5\u5305\u5206\u7C7B", children: [
+      /* @__PURE__ */ jsxs("div", { className: "meme-dashboard__sidebar-heading", children: [
+        /* @__PURE__ */ jsx("h2", { children: "\u5206\u7C7B" }),
+        /* @__PURE__ */ jsx("span", { children: categories.length })
+      ] }),
+      categories.map((c) => /* @__PURE__ */ jsxs("div", { className: "meme-category-row", children: [
+        /* @__PURE__ */ jsxs(
+          "button",
+          {
+            type: "button",
+            className: `meme-category${selectedTag === c.tag ? " is-active" : ""}`,
+            onClick: () => setSelectedTag(c.tag),
+            "aria-current": selectedTag === c.tag ? "page" : void 0,
+            disabled: !c.enabled,
+            children: [
+              /* @__PURE__ */ jsxs("span", { children: [
+                /* @__PURE__ */ jsx("strong", { children: c.name || c.tag }),
+                /* @__PURE__ */ jsx("small", { children: c.desc || c.tag })
+              ] }),
+              /* @__PURE__ */ jsx("b", { children: c.count })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            className: "meme-delete",
+            onClick: () => {
+              if (confirm(`\u786E\u5B9A\u8981\u5220\u9664\u5206\u7C7B "${c.tag}" \u5417\uFF1F\u8FD9\u4F1A\u6C38\u4E45\u5220\u9664\u8BE5\u5206\u7C7B\u53CA\u5176\u6240\u6709\u56FE\u7247\uFF01`)) {
+                void api(`/api/dashboard/meme/categories/${c.tag}`, { method: "DELETE" }).then(() => {
+                  setCategories((categories2) => {
+                    const next = categories2.filter((cat) => cat.tag !== c.tag);
+                    if (selectedTag === c.tag) setSelectedTag(next.length > 0 ? next[0].tag : null);
+                    return next;
+                  });
+                }).catch((err) => alert("\u5220\u9664\u5931\u8D25\uFF1A" + err.message));
+              }
+            },
+            "aria-label": `\u5220\u9664\u5206\u7C7B ${c.tag}`,
+            title: "\u5220\u9664\u5206\u7C7B",
+            children: "\u2715"
+          }
+        )
+      ] }, c.tag)),
+      !loading && categories.length === 0 && /* @__PURE__ */ jsx("p", { className: "meme-dashboard__nav-empty", children: "\u8FD8\u6CA1\u6709\u5206\u7C7B\u3002" })
+    ] }),
+    /* @__PURE__ */ jsxs("section", { className: "meme-dashboard__gallery", children: [
+      /* @__PURE__ */ jsxs("div", { className: "meme-dashboard__header", children: [
+        /* @__PURE__ */ jsxs("div", { children: [
+          /* @__PURE__ */ jsx("p", { children: "\u8868\u60C5\u5305\u5E93" }),
+          /* @__PURE__ */ jsx("h1", { id: "meme-dashboard-title", children: selectedTag ? categories.find((c) => c.tag === selectedTag)?.name || selectedTag : "\u9009\u62E9\u4E00\u4E2A\u5206\u7C7B" }),
+          /* @__PURE__ */ jsx("div", { className: "meme-dashboard__description", children: selectedTag ? categories.find((c) => c.tag === selectedTag)?.desc : "" })
+        ] }),
+        /* @__PURE__ */ jsxs("span", { className: "meme-dashboard__total", children: [
+          images.length,
+          " \u5F20\u56FE\u7247"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "meme-grid", "aria-live": "polite", children: [
+        images.map((img) => /* @__PURE__ */ jsxs("figure", { className: "meme-item", children: [
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "meme-item__delete",
+              onClick: (e) => {
+                e.stopPropagation();
+                if (confirm(`\u786E\u5B9A\u8981\u5220\u9664\u56FE\u7247 "${img}" \u5417\uFF1F`)) {
+                  void api(`/api/dashboard/meme/media/${selectedTag}/${img}`, { method: "DELETE" }).then(() => {
+                    setImages((images2) => images2.filter((i) => i !== img));
+                    setCategories((categories2) => categories2.map((c) => c.tag === selectedTag ? { ...c, count: c.count - 1 } : c));
+                  }).catch((err) => alert("\u5220\u9664\u5931\u8D25\uFF1A" + err.message));
+                }
+              },
+              "aria-label": `\u5220\u9664\u56FE\u7247 ${img}`,
+              title: "\u5220\u9664\u56FE\u7247",
+              children: "\u2715"
+            }
+          ),
+          /* @__PURE__ */ jsx("div", { className: "meme-item__preview", children: /* @__PURE__ */ jsx(MemeImage, { tag: selectedTag, name: img }) }),
+          /* @__PURE__ */ jsx("figcaption", { title: img, children: img })
+        ] }, img)),
+        loading && /* @__PURE__ */ jsx("div", { className: "meme-state", role: "status", children: "\u6B63\u5728\u8BFB\u53D6\u8868\u60C5\u5305\u5206\u7C7B\u2026" }),
+        !loading && !error && images.length === 0 && selectedTag && /* @__PURE__ */ jsxs("div", { className: "meme-state", children: [
+          /* @__PURE__ */ jsx("strong", { children: "\u8FD9\u4E2A\u5206\u7C7B\u8FD8\u6CA1\u6709\u56FE\u7247" }),
+          /* @__PURE__ */ jsx("span", { children: "\u901A\u8FC7 Meme \u63D2\u4EF6\u5BFC\u5165\u56FE\u7247\u540E\u4F1A\u663E\u793A\u5728\u8FD9\u91CC\u3002" })
+        ] }),
+        error && /* @__PURE__ */ jsxs("div", { className: "meme-state is-error", role: "alert", children: [
+          /* @__PURE__ */ jsx("strong", { children: "\u65E0\u6CD5\u52A0\u8F7D\u8868\u60C5\u5305" }),
+          /* @__PURE__ */ jsx("span", { children: error })
+        ] })
+      ] })
+    ] })
+  ] });
 }
+function MemeImage({ tag, name }) {
+  const [source, setSource] = useState(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    let objectUrl = null;
+    void media(`/api/dashboard/meme/media/${tag}/${name}`, controller.signal).then((blob) => {
+      objectUrl = URL.createObjectURL(blob);
+      setSource(objectUrl);
+    }, (reason) => {
+      if (!controller.signal.aborted) console.error("Meme \u56FE\u7247\u8BFB\u53D6\u5931\u8D25", reason);
+    });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [name, tag]);
+  return /* @__PURE__ */ jsx("img", { src: source ?? void 0, alt: "", loading: "lazy" });
+}
+var panel = {
+  id: "meme",
+  label: "Meme \u8868\u60C5\u5305",
+  viewLabel: "\u8868\u60C5\u5305",
+  order: 50,
+  layout: "workbench",
+  rowKey: "id",
+  columns: [],
+  async getCount({ signal }) {
+    try {
+      const data = await api("/api/dashboard/meme/categories", { signal });
+      let total = 0;
+      for (const cat of data.categories || []) {
+        total += cat.count;
+      }
+      return total;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return null;
+    }
+  },
+  async fetchPage() {
+    return { items: [], total: 0 };
+  },
+  Main: MemeMain
+};
+function activate(ctx) {
+  dashboardRequest = ctx.http.request;
+  const release = ctx.ui.inject("workbench.panels.v2", (mount) => mount.register(panel));
+  return () => {
+    release();
+    dashboardRequest = null;
+  };
+}
+export {
+  activate
+};
