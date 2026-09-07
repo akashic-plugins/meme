@@ -4,33 +4,28 @@ import importlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import shutil
 import sys
-from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 
-from agent.core.response_parser import ResponseMetadata
-from agent.lifecycle.composition import (
-    AFTER_REASONING_CLEANUP_EVENT,
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
-)
-from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
-from agent.plugin_composition import (
-    CompositionRoot,
-    Context,
-    DashboardContext,
-    PluginRuntime,
-)
+from agent.plugin_composition.artifacts import ARTIFACT_IMPORT
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.dashboard_host import DashboardBinding, PluginDashboardHost
 from agent.plugins.manager import PluginManager
+from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
+from infra.channels.artifacts import ChannelAttachmentArtifactStore
+from plugins.content import plugin as content_module
+from plugins.content.plugin import CONTENT
+from session.artifact_store import ArtifactStore
+from session.log import MessageLog
+from session.message import Output
+from session.message_codec import json_value
 from runtime import MemeCatalog, MemeDecorator
 
 
@@ -49,279 +44,91 @@ def _load_meme_plugin_module():
     return module
 
 
-def _load_exact_citation_module(citation_root: Path):
-    path = citation_root / "plugin.py"
-    spec = importlib.util.spec_from_file_location(
-        "test_exact_citation_plugin",
-        path,
-        submodule_search_locations=[str(path.parent)],
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(str(path))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_meme_plugin_module = _load_meme_plugin_module()
-CITATION_PROTOCOL_SERVICE = _meme_plugin_module.CITATION_PROTOCOL_SERVICE
-apply = _meme_plugin_module.apply
-decorate_meme_ctx = _meme_plugin_module.decorate_meme_ctx
-inject = _meme_plugin_module.inject
+meme_module = _load_meme_plugin_module()
 
 
 def _copy_ignore():
-    return shutil.ignore_patterns(
-        ".akashic-core",
-        ".citation",
-        ".git",
-        ".plugin-contracts",
-        ".pytest_cache",
-        "__pycache__",
-    )
+    return shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__")
 
 
-def _write_meme_workspace(workspace: Path) -> Path:
-    memes = workspace / "memes"
-    (memes / "shy").mkdir(parents=True)
-    image = memes / "shy" / "001.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\n")
-    (memes / "manifest.json").write_text(
-        json.dumps(
-            {"categories": {"shy": {"desc": "害羞", "enabled": True}}},
-            ensure_ascii=False,
-        ),
+def _write_manifest(root: Path, categories: dict[str, object]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "manifest.json"
+    path.write_text(
+        json.dumps({"categories": categories}, ensure_ascii=False),
         encoding="utf-8",
     )
-    return image
+    return path
 
 
-def test_static_manifest_matches_v3_module() -> None:
-    manifest = load_static_plugin_manifest(
-        Path(_meme_plugin_module.__file__ or "").resolve().parent
+def _write_image(root: Path, category: str, name: str = "001.png") -> Path:
+    directory = root / category
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    return path
+
+
+def test_static_manifest_preserves_package_contributions() -> None:
+    manifest = load_static_plugin_manifest(Path(meme_module.__file__).parent)
+    plugin = ComposablePlugin.from_module(meme_module)
+    assert manifest.name == meme_module.name == "meme"
+    assert manifest.version == meme_module.version == "2.0.0"
+    assert plugin.inject == (CONTENT, ARTIFACT_IMPORT)
+    assert plugin.skill_roots == ("skills",)
+    assert plugin.dashboard_module == "dashboard.py"
+    assert plugin.workspace_roots == ("memes",)
+
+
+def test_catalog_and_decorator_keep_category_selection(tmp_path: Path) -> None:
+    memes = tmp_path / "memes"
+    image = _write_image(memes, "shy")
+    _write_manifest(
+        memes,
+        {"shy": {"desc": "害羞", "aliases": ["脸红"], "enabled": True}},
     )
-
-    assert manifest.name == _meme_plugin_module.name == "meme"
-    assert manifest.version == _meme_plugin_module.version == "1.0.1"
-    assert manifest.api_version == _meme_plugin_module.api_version == 3
-    assert manifest.entrypoint == "plugin.py"
-
-
-def _prompt_ctx() -> PromptRenderCtx:
-    return PromptRenderCtx(
-        session_key="webui:1",
-        channel="webui",
-        chat_id="1",
-        content="你好",
-        media=None,
-        timestamp=datetime.now(timezone.utc),
-        history=[],
-        skill_names=[],
-        disabled_sections=set(),
-        turn_injection_prompt="",
-    )
-
-
-def _answer_ctx(reply: str) -> AfterReasoningCtx:
-    return AfterReasoningCtx(
-        session_key="webui:1",
-        channel="webui",
-        chat_id="1",
-        tools_used=(),
-        thinking=None,
-        response_metadata=ResponseMetadata(raw_text=reply),
-        streamed=False,
-        tool_chain=(),
-        context_retry={},
-        reply=reply,
-    )
-
-
-def test_catalog_builds_prompt_block(tmp_path: Path) -> None:
-    _ = _write_meme_workspace(tmp_path)
-    block = MemeCatalog(tmp_path / "memes").build_prompt_block()
-    assert block is not None
-    assert "<meme:shy>" in block
-    assert "只有当你真的要发这个表情时" in block
-    assert "代码样式的 `<meme:category>`" in block
-
-
-def test_decorator_picks_image_for_tag(tmp_path: Path) -> None:
-    image = _write_meme_workspace(tmp_path)
-    result = MemeDecorator(MemeCatalog(tmp_path / "memes")).decorate(
-        "好的", meme_tag="shy"
-    )
+    catalog = MemeCatalog(memes)
+    snapshot = catalog.snapshot()
+    assert "<meme:shy>" in (snapshot.build_prompt_block() or "")
+    result = MemeDecorator(snapshot).decorate("好的", meme_tag="shy")
     assert result.content == "好的"
     assert result.media == [str(image)]
+    assert result.tag == "shy"
 
 
-def test_decorate_meme_ctx_updates_answer_metadata(tmp_path: Path) -> None:
-    image = _write_meme_workspace(tmp_path)
-    ctx = _answer_ctx("好的 <meme:shy>")
-    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
-    assert ctx.reply == "好的"
-    assert ctx.media == [str(image)]
-    assert ctx.meme_tag == "shy"
+def test_invalid_manifest_is_not_cached_as_an_empty_catalog(tmp_path: Path) -> None:
+    manifest = _write_manifest(tmp_path, {"shy": {"desc": "害羞"}})
+    catalog = MemeCatalog(tmp_path)
+    assert catalog.snapshot().categories
+    manifest.write_text("{broken")
+    for _ in range(2):
+        with pytest.raises(json.JSONDecodeError):
+            catalog.snapshot()
 
 
-def test_decorate_meme_ctx_accepts_inline_tag(tmp_path: Path) -> None:
-    image = _write_meme_workspace(tmp_path)
-    ctx = _answer_ctx("快了 <meme:shy>\n\n马上到了")
-    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
-    assert ctx.reply == "快了\n\n马上到了"
-    assert ctx.media == [str(image)]
-    assert ctx.meme_tag == "shy"
-
-
-def test_decorate_meme_ctx_ignores_code_tag(tmp_path: Path) -> None:
-    _ = _write_meme_workspace(tmp_path)
-    ctx = _answer_ctx("应该是 `<meme:shy>`。\n\n<æm>shy</æm>")
-    decorate_meme_ctx(ctx, MemeDecorator(MemeCatalog(tmp_path / "memes")))
-    assert ctx.reply == "应该是 `<meme:shy>`。\n\n<æm>shy</æm>"
-    assert ctx.media == []
-    assert ctx.meme_tag is None
-
-
-@pytest.mark.asyncio
-async def test_v3_named_exports_run_complete_lifecycle_behavior(
+def test_catalog_rejects_images_linked_outside_the_material_root(
     tmp_path: Path,
 ) -> None:
-    image = _write_meme_workspace(tmp_path)
-    composable = ComposablePlugin.from_module(_meme_plugin_module)
-    assert composable.skill_roots == ("skills",)
-    assert composable.dashboard_module == "dashboard.py"
-    assert composable.workspace_roots == ("memes",)
-    root = CompositionRoot("meme-v3")
-    _ = await root.context.provide(CITATION_PROTOCOL_SERVICE, object())
-
-    async def mount(ctx: Context) -> None:
-        await apply(ctx, object())
-
-    _ = await root.mount(
-        mount,
-        name="meme",
-        inject=inject,
-        runtime=PluginRuntime(
-            plugin_id="meme",
-            generation_id=root.generation_id,
-            plugin_dir=Path(__file__).parents[1],
-            data_dir=tmp_path / "plugin-data",
-            workspace=tmp_path,
-            config=object(),
-            workspace_roots=("memes",),
-        ),
-    )
-    receipt = root.receipt()
-    assert receipt.ready is True
-    assert receipt.writes == ()
-    assert receipt.external_effects == ()
-
-    prompt = _prompt_ctx()
-    _ = await root.context.serial(PROMPT_RENDER_EVENT, prompt)
-    assert [section.name for section in prompt.system_sections_bottom] == ["memes"]
-
-    answer = _answer_ctx("好的 <meme:shy>")
-    _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, answer)
-    assert answer.reply == "好的"
-    assert answer.media == [str(image)]
-    assert answer.meme_tag == "shy"
-
-    await root.dispose()
-    assert root.receipt().effects == ()
-    assert root.topology_view().listeners == ()
+    memes = tmp_path / "memes"
+    _write_manifest(memes, {"shy": {"desc": "害羞"}})
+    category = memes / "shy"
+    category.mkdir()
+    outside = tmp_path / "private.png"
+    outside.write_bytes(b"private")
+    (category / "linked.png").symlink_to(outside)
+    with pytest.raises(ValueError, match="素材根目录之外"):
+        MemeCatalog(memes).snapshot()
+    assert outside.read_bytes() == b"private"
 
 
-@pytest.mark.asyncio
-async def test_v3_candidate_reads_only_its_projected_meme_root(
-    tmp_path: Path,
-) -> None:
-    formal_workspace = tmp_path / "formal-workspace"
-    formal_image = _write_meme_workspace(formal_workspace)
-    candidate_workspace = (
-        tmp_path
-        / "runtime"
-        / "plugin-validation"
-        / "meme"
-        / "composition"
-        / "attempt"
-        / "workspace"
-    )
-    _ = shutil.copytree(
-        formal_workspace / "memes",
-        candidate_workspace / "memes",
-    )
-    candidate_image = candidate_workspace / "memes" / "shy" / "001.png"
-    before = {
-        path.relative_to(candidate_workspace).as_posix(): path.read_bytes()
-        for path in candidate_workspace.rglob("*")
-        if path.is_file()
-    }
-    root = CompositionRoot("meme-candidate")
-    _ = await root.context.provide(CITATION_PROTOCOL_SERVICE, object())
-
-    async def mount(ctx: Context) -> None:
-        await apply(ctx, object())
-
-    _ = await root.mount(
-        mount,
-        name="meme",
-        inject=inject,
-        runtime=PluginRuntime(
-            plugin_id="meme",
-            generation_id=root.generation_id,
-            plugin_dir=Path(__file__).parents[1],
-            data_dir=tmp_path / "candidate-data",
-            workspace=candidate_workspace,
-            config=object(),
-            workspace_roots=("memes",),
-        ),
-    )
-    prompt = _prompt_ctx()
-    _ = await root.context.serial(PROMPT_RENDER_EVENT, prompt)
-    answer = _answer_ctx("好的 <meme:shy>")
-    _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, answer)
-
+def _dashboard_route(tmp_path: Path, path: str, method: str):
     dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
     app = FastAPI()
     dashboard_module.register(
         app,
-        DashboardContext(
-            plugin_id="meme",
-            plugin_dir=Path(__file__).parents[1],
-            data_root=tmp_path / "candidate-data",
-            validation=True,
-            _workspace_roots=(("memes", candidate_workspace / "memes"),),
-        ),
-    )
-    candidate_route = next(
-        route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.path == "/api/dashboard/meme/categories"
-    )
-    categories = candidate_route.endpoint()
-
-    after = {
-        path.relative_to(candidate_workspace).as_posix(): path.read_bytes()
-        for path in candidate_workspace.rglob("*")
-        if path.is_file()
-    }
-    assert before == after
-    assert formal_image.read_bytes() == candidate_image.read_bytes()
-    assert answer.media == [str(candidate_image)]
-    assert categories["categories"][0]["tag"] == "shy"
-    assert root.receipt().writes == ()
-    assert root.receipt().external_effects == ()
-    await root.dispose()
-
-
-def _meme_dashboard_route(tmp_path: Path, path: str, method: str):
-    dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
-    app = FastAPI()
-    dashboard_module.register(
-        app,
-        DashboardContext(
+        __import__(
+            "agent.plugin_composition", fromlist=["DashboardContext"]
+        ).DashboardContext(
             plugin_id="meme",
             plugin_dir=Path(__file__).parents[1],
             data_root=tmp_path / "data",
@@ -338,205 +145,231 @@ def _meme_dashboard_route(tmp_path: Path, path: str, method: str):
     )
 
 
-def test_dashboard_rejects_media_path_traversal(tmp_path: Path) -> None:
-    media_route = _meme_dashboard_route(
+def test_dashboard_rejects_path_traversal_and_keeps_delete_recovery(
+    tmp_path: Path,
+) -> None:
+    memes = tmp_path / "memes"
+    image = _write_image(memes, "shy")
+    _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
+    media = _dashboard_route(
         tmp_path,
         "/api/dashboard/meme/media/{tag}/{filename}",
         "GET",
     )
-
-    with pytest.raises(HTTPException, match="Invalid category") as raised:
-        media_route.endpoint("..", "secret.png")
-
+    with pytest.raises(HTTPException) as raised:
+        media.endpoint("..", "secret.png")
     assert raised.value.status_code == 422
 
-
-def test_dashboard_rejects_media_symlink(tmp_path: Path) -> None:
-    image = _write_meme_workspace(tmp_path)
-    secret = tmp_path / "secret.png"
-    secret.write_bytes(b"secret")
-    image.unlink()
-    image.symlink_to(secret)
-    media_route = _meme_dashboard_route(
-        tmp_path,
-        "/api/dashboard/meme/media/{tag}/{filename}",
-        "GET",
-    )
-
-    with pytest.raises(HTTPException, match="Invalid filename") as raised:
-        media_route.endpoint("shy", "001.png")
-
-    assert raised.value.status_code == 422
-
-
-def test_dashboard_delete_keeps_named_recovery_copy(tmp_path: Path) -> None:
-    image = _write_meme_workspace(tmp_path)
-    delete_route = _meme_dashboard_route(
+    delete = _dashboard_route(
         tmp_path,
         "/api/dashboard/meme/media/{tag}/{filename}",
         "DELETE",
     )
-
-    result = delete_route.endpoint("shy", "001.png")
-
+    receipt = delete.endpoint("shy", "001.png")
     assert not image.exists()
-    recovery_id = result["recovery_id"]
-    assert recovery_id.startswith("image-")
-    recovered = tmp_path / "memes" / ".trash" / recovery_id / "001.png"
-    assert recovered.read_bytes() == b"\x89PNG\r\n\x1a\n"
+    recovered = memes / ".trash" / receipt["recovery_id"] / "001.png"
+    assert recovered.read_bytes() == b"\x89PNG\r\n\x1a\nfixture"
 
 
-def test_category_delete_restores_directory_when_manifest_write_fails(
+def test_dashboard_rejects_media_symlink(tmp_path: Path) -> None:
+    memes = tmp_path / "memes"
+    image = _write_image(memes, "shy")
+    _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"secret")
+    image.unlink()
+    image.symlink_to(secret)
+    media = _dashboard_route(
+        tmp_path,
+        "/api/dashboard/meme/media/{tag}/{filename}",
+        "GET",
+    )
+    with pytest.raises(HTTPException) as raised:
+        media.endpoint("shy", "001.png")
+    assert raised.value.status_code == 422
+
+
+def test_category_delete_restores_when_manifest_write_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    image = _write_meme_workspace(tmp_path)
+    memes = tmp_path / "memes"
+    image = _write_image(memes, "shy")
+    _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
     dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
 
     def fail_write(*_args) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(dashboard_module, "_write_manifest", fail_write)
-    delete_route = _meme_dashboard_route(
+    delete = _dashboard_route(
         tmp_path,
         "/api/dashboard/meme/categories/{tag}",
         "DELETE",
     )
-
     with pytest.raises(HTTPException, match="Failed to preserve deleted category"):
-        delete_route.endpoint("shy")
-
+        delete.endpoint("shy")
     assert image.is_file()
-    manifest = json.loads((tmp_path / "memes" / "manifest.json").read_text())
+    manifest = json.loads((memes / "manifest.json").read_text())
     assert "shy" in manifest["categories"]
 
 
 @pytest.mark.asyncio
-async def test_v3_plugin_loads_package_and_dashboard_through_real_manager(
+async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
     tmp_path: Path,
 ) -> None:
-    _ = _write_meme_workspace(tmp_path / "workspace")
-    plugin_home = tmp_path / "plugins"
-    citation_dir = plugin_home / "citation"
-    citation_dir.mkdir(parents=True)
-    (citation_dir / "plugin.py").write_text(
-        "from agent.plugin_composition import ServiceKey\n"
-        "api_version = 3\n"
-        "name = 'citation'\n"
-        "version = '1.0.0'\n"
-        "SERVICE = ServiceKey('citation.protocol')\n"
-        "async def apply(ctx, config):\n"
-        "    await ctx.provide(SERVICE, object())\n",
-        encoding="utf-8",
+    workspace = tmp_path / "workspace"
+    memes = workspace / "memes"
+    shy = _write_image(memes, "shy")
+    manifest = _write_manifest(
+        memes,
+        {"shy": {"desc": "害羞", "enabled": True}},
     )
-    _ = shutil.copytree(
+    plugin_home = tmp_path / "plugins"
+    core_plugins = Path(content_module.__file__).parents[1]
+    shutil.copytree(core_plugins / "content", plugin_home / "content")
+    shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "meme",
         ignore=_copy_ignore(),
     )
-    workspace = tmp_path / "workspace"
+    log = MessageLog(workspace / "sessions.db")
+    records = ArtifactStore(workspace / "sessions.db")
+    physical = ChannelAttachmentArtifactStore(
+        workspace=workspace,
+        metadata_store=records,
+    )
     manager = PluginManager(
         plugin_dirs=[plugin_home],
         event_bus=EventBus(),
-        tool_registry=None,
         workspace=workspace,
-        installed_cache_root=tmp_path / "plugin-home" / "cache",
+        message_log=log,
+        channel_attachment_store=physical,
     )
-
     await manager.load_all()
-
-    generation = manager.generation("meme")
     snapshot = manager.current_snapshot
-    assert generation is not None and snapshot is not None
+    assert snapshot is not None and snapshot.composition_root is not None
+    generation = manager.generation("meme")
+    assert generation is not None
     assert isinstance(generation.instance, ComposablePlugin)
-    assert generation.contributions.skill_roots == (plugin_home / "meme" / "skills",)
-    assert generation.contributions.dashboard_module == (
-        plugin_home / "meme" / "dashboard.py"
+    assert snapshot.composition_topology is not None
+    assert snapshot.composition_topology.listeners == ()
+
+    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
+    token = bind_runtime_snapshot(lease)
+    try:
+        content = snapshot.composition_root.context.require(CONTENT)
+        async with content.bind() as old_view:
+            assert "<meme:shy>" in old_view.prompts[0]
+            happy = _write_image(memes, "happy")
+            _write_manifest(
+                memes,
+                {"happy": {"desc": "开心", "enabled": True}},
+            )
+            changed = manifest.stat().st_mtime + 2
+            os.utime(manifest, (changed, changed))
+            assert "<meme:shy>" in old_view.prompts[0]
+            parts, metadata = await old_view.decode("好的 <meme:shy>")
+            artifact_ids = tuple(
+                str(part.value) for part in parts if part.kind == "artifact_ref"
+            )
+            assert len(artifact_ids) == 1
+            assert json_value(metadata["meme"]) == {
+                "version": 1,
+                "category": "shy",
+                "selection": "random",
+                "status": "selected",
+            }
+            ref = physical.resolve_refs(artifact_ids)[0]
+            assert ref.sha256
+            assert shy.read_bytes() == b"\x89PNG\r\n\x1a\nfixture"
+            writer = log.writer(
+                "session",
+                author="model",
+                source="conversation",
+                body_types=(Output,),
+                content=old_view.checks,
+                check_metadata=old_view.check_metadata,
+            )
+            saved = writer.append(
+                "reply",
+                Output(parts, "complete"),
+                metadata=metadata,
+            )
+            assert json_value(saved.metadata)["meme"]["category"] == "shy"
+            assert saved.body.parts[-1].kind == "artifact_ref"
+
+        async with content.bind() as new_view:
+            assert "- happy: 开心" in new_view.prompts[0]
+            assert "- shy: 害羞" not in new_view.prompts[0]
+            literal = "这里的 <meme:happy> 是格式说明，不是发送请求。"
+            literal_parts, literal_metadata = await new_view.decode(literal)
+            assert "".join(str(part.value) for part in literal_parts) == literal
+            assert not literal_metadata
+            parts, metadata = await new_view.decode(
+                "`示例 <meme:happy>`\n真的 <meme:happy>"
+            )
+            assert any(part.kind == "artifact_ref" for part in parts)
+            assert json_value(metadata["meme"])["category"] == "happy"
+            assert happy.read_bytes() == b"\x89PNG\r\n\x1a\nfixture"
+
+            missing_parts, missing = await new_view.decode("试试 <meme:absent>")
+            assert not any(part.kind == "artifact_ref" for part in missing_parts)
+            assert json_value(missing["meme"])["status"] == "missing"
+    finally:
+        reset_runtime_snapshot(token)
+        await lease.release()
+        root = snapshot.composition_root
+        await manager.terminate_all()
+        records.close()
+        log.close()
+        assert root.receipt().effects == ()
+
+
+@pytest.mark.asyncio
+async def test_real_manager_keeps_dashboard_and_skill_contributions(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    memes = workspace / "memes"
+    _write_image(memes, "shy")
+    _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
+    plugin_home = tmp_path / "plugins"
+    core_plugins = Path(content_module.__file__).parents[1]
+    shutil.copytree(core_plugins / "content", plugin_home / "content")
+    shutil.copytree(
+        Path(__file__).parents[1],
+        plugin_home / "meme",
+        ignore=_copy_ignore(),
     )
-    assert generation.instance.workspace_roots == ("memes",)
+    log = MessageLog(workspace / "sessions.db")
+    records = ArtifactStore(workspace / "sessions.db")
+    manager = PluginManager(
+        plugin_dirs=[plugin_home],
+        event_bus=EventBus(),
+        workspace=workspace,
+        message_log=log,
+        channel_attachment_store=ChannelAttachmentArtifactStore(
+            workspace=workspace,
+            metadata_store=records,
+        ),
+    )
+    await manager.load_all()
+    snapshot = manager.current_snapshot
+    assert snapshot is not None
     assert snapshot.plugin_skill_index is not None
     assert "meme-manage" in snapshot.plugin_skill_index.records
-
-    dashboard = PluginDashboardHost(
-        core_routes=(),
-    )
+    dashboard = PluginDashboardHost(core_routes=())
     dashboard.prepare_snapshot(snapshot)
     assert len(snapshot.dashboard_bindings) == 1
     binding = snapshot.dashboard_bindings[0]
     assert isinstance(binding, DashboardBinding)
-    assert binding.plugin_id == "meme"
-    assert binding.validation is False
-    assert binding.runtime_workspace == workspace.resolve()
     categories = next(
         route.endpoint
         for route in binding.routes
         if route.path == "/api/dashboard/meme/categories"
     )()
     assert categories["categories"][0]["tag"] == "shy"
-
-    root = snapshot.composition_root
-    assert root is not None
     await manager.terminate_all()
-    assert root.receipt().effects == ()
-    assert root.topology_view().listeners == ()
-
-
-@pytest.mark.asyncio
-async def test_citation_meme_cross_repository_v3_behavior(tmp_path: Path) -> None:
-    raw_citation_root = os.environ.get("AKASHIC_CITATION_ROOT", "").strip()
-    if not raw_citation_root:
-        raise RuntimeError(
-            "AKASHIC_CITATION_ROOT 必须指向 exact-commit Citation checkout"
-        )
-    citation_root = Path(raw_citation_root)
-    citation_module = _load_exact_citation_module(citation_root)
-    assert not hasattr(citation_module, "CitationPlugin")
-
-    workspace = tmp_path / "workspace"
-    image = _write_meme_workspace(workspace)
-    plugin_home = tmp_path / "plugins"
-    _ = shutil.copytree(
-        citation_root,
-        plugin_home / "citation",
-        ignore=_copy_ignore(),
-    )
-    _ = shutil.copytree(
-        Path(__file__).parents[1],
-        plugin_home / "meme",
-        ignore=_copy_ignore(),
-    )
-    manager = PluginManager(
-        plugin_dirs=[plugin_home],
-        event_bus=EventBus(),
-        tool_registry=None,
-        workspace=workspace,
-        installed_cache_root=tmp_path / "plugin-home" / "cache",
-    )
-    await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
-
-    prompt = _prompt_ctx()
-    _ = await snapshot.composition_root.context.serial(PROMPT_RENDER_EVENT, prompt)
-    answer = _answer_ctx("答复正文\n§cited:[mem_1]§ <meme:shy>")
-    _ = await snapshot.composition_root.context.serial(
-        AFTER_REASONING_PREPROCESS_EVENT,
-        answer,
-    )
-    _ = await snapshot.composition_root.context.serial(
-        AFTER_REASONING_CLEANUP_EVENT,
-        answer,
-    )
-
-    assert [section.name for section in prompt.system_sections_bottom] == [
-        "citation_protocol",
-        "memes",
-    ]
-    assert answer.reply == "答复正文"
-    assert answer.persist_assistant_metadata["cited_memory_ids"] == ["mem_1"]
-    assert answer.media == [str(image)]
-    assert answer.meme_tag == "shy"
-    root = snapshot.composition_root
-    await manager.terminate_all()
-    assert root.receipt().effects == ()
-    assert root.topology_view().listeners == ()
+    records.close()
+    log.close()
