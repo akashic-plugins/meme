@@ -16,6 +16,10 @@ _MEME_RE = re.compile(
     r"\s*<meme:([a-zA-Z0-9_-]+)>",
     re.IGNORECASE,
 )
+_PROTOCOL_SUFFIX_RE = re.compile(
+    r"(?:\s*(?:<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>|§[a-zA-Z][a-zA-Z0-9_-]*:\[[^\]]*\]§))*\s*$",
+    re.IGNORECASE,
+)
 
 
 def _meme_prompt(snapshot: MemeSnapshot) -> str:
@@ -31,7 +35,11 @@ async def decode_meme(
     artifacts: ArtifactImport,
 ) -> tuple[Sequence[Span], Mapping[str, object]]:
     """清理 Meme 标记，选定并导入至多一张不可变图片。"""
-    matches = list(source.matches(_MEME_RE))
+    matches = [
+        match
+        for match in source.matches(_MEME_RE)
+        if _PROTOCOL_SUFFIX_RE.fullmatch(source.text[match.end() :]) is not None
+    ]
     if not matches:
         return (), {}
 

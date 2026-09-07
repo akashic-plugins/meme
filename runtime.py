@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -70,33 +71,40 @@ class MemeCatalog:
         mtime = manifest.stat().st_mtime
         if mtime == self._manifest_mtime:
             return
-        self._manifest_mtime = mtime
-        self._categories = {}
-        try:
-            raw: object = json.loads(manifest.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        raw: object = json.loads(manifest.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            return
+            raise ValueError("Meme manifest 必须是对象")
         data = cast(dict[str, object], raw)
         categories = data.get("categories")
         if not isinstance(categories, dict):
-            return
+            raise ValueError("Meme categories 必须是对象")
         categories_map = cast(dict[object, object], categories)
+        loaded: dict[str, MemeCategory] = {}
         for raw_name, raw_info in categories_map.items():
-            if not isinstance(raw_name, str) or not isinstance(raw_info, dict):
-                continue
+            if (
+                not isinstance(raw_name, str)
+                or re.fullmatch(r"[a-zA-Z0-9_-]+", raw_name) is None
+                or not isinstance(raw_info, dict)
+            ):
+                raise ValueError("Meme 类别名称或内容无效")
             info = cast(dict[str, object], raw_info)
             aliases = info.get("aliases", [])
-            alias_items = (
-                cast(list[object], aliases) if isinstance(aliases, list) else []
-            )
-            self._categories[raw_name] = MemeCategory(
+            desc, enabled = info.get("desc", ""), info.get("enabled", True)
+            if (
+                not isinstance(aliases, list)
+                or any(not isinstance(alias, str) for alias in aliases)
+                or not isinstance(desc, str)
+                or not isinstance(enabled, bool)
+            ):
+                raise ValueError("Meme 类别字段无效")
+            loaded[raw_name] = MemeCategory(
                 name=raw_name,
-                desc=str(info.get("desc", "") or ""),
-                aliases=[str(item) for item in alias_items],
-                enabled=bool(info.get("enabled", True)),
+                desc=desc,
+                aliases=cast(list[str], aliases),
+                enabled=enabled,
             )
+        self._categories = loaded
+        self._manifest_mtime = mtime
 
     def get_enabled_categories(self) -> list[MemeCategory]:
         self._load()
@@ -111,11 +119,16 @@ class MemeCatalog:
             if not category_dir.is_dir():
                 images[category.name.lower()] = ()
                 continue
-            images[category.name.lower()] = tuple(
-                str(path)
+            paths = tuple(
+                path
                 for path in category_dir.iterdir()
-                if path.suffix.lower() in _IMAGE_SUFFIXES
+                if path.suffix.lower() in _IMAGE_SUFFIXES and path.is_file()
             )
+            if any(
+                not path.resolve().is_relative_to(self._dir.resolve()) for path in paths
+            ):
+                raise ValueError("Meme 图片不能指向素材根目录之外")
+            images[category.name.lower()] = tuple(str(path) for path in paths)
         return MemeSnapshot(categories, MappingProxyType(images))
 
     def pick_image(self, tag: str) -> str | None:

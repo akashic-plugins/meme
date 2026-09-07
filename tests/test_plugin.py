@@ -96,6 +96,31 @@ def test_catalog_and_decorator_keep_category_selection(tmp_path: Path) -> None:
     assert result.tag == "shy"
 
 
+def test_invalid_manifest_is_not_cached_as_an_empty_catalog(tmp_path: Path) -> None:
+    manifest = _write_manifest(tmp_path, {"shy": {"desc": "害羞"}})
+    catalog = MemeCatalog(tmp_path)
+    assert catalog.snapshot().categories
+    manifest.write_text("{broken")
+    for _ in range(2):
+        with pytest.raises(json.JSONDecodeError):
+            catalog.snapshot()
+
+
+def test_catalog_rejects_images_linked_outside_the_material_root(
+    tmp_path: Path,
+) -> None:
+    memes = tmp_path / "memes"
+    _write_manifest(memes, {"shy": {"desc": "害羞"}})
+    category = memes / "shy"
+    category.mkdir()
+    outside = tmp_path / "private.png"
+    outside.write_bytes(b"private")
+    (category / "linked.png").symlink_to(outside)
+    with pytest.raises(ValueError, match="素材根目录之外"):
+        MemeCatalog(memes).snapshot()
+    assert outside.read_bytes() == b"private"
+
+
 def _dashboard_route(tmp_path: Path, path: str, method: str):
     dashboard_module = importlib.import_module("test_meme_plugin.dashboard")
     app = FastAPI()
@@ -277,6 +302,10 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
         async with content.bind() as new_view:
             assert "- happy: 开心" in new_view.prompts[0]
             assert "- shy: 害羞" not in new_view.prompts[0]
+            literal = "这里的 <meme:happy> 是格式说明，不是发送请求。"
+            literal_parts, literal_metadata = await new_view.decode(literal)
+            assert "".join(str(part.value) for part in literal_parts) == literal
+            assert not literal_metadata
             parts, metadata = await new_view.decode(
                 "`示例 <meme:happy>`\n真的 <meme:happy>"
             )
