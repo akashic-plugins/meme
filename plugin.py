@@ -1,49 +1,92 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 
-from agent.lifecycle.composition import (
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
-)
-from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
-from agent.plugin_composition import Context, ServiceKey
-from agent.prompting import PromptSectionRender
-from .runtime import MemeCatalog, MemeDecorator
+from agent.plugin_composition import Context
+from agent.plugin_composition.artifacts import ARTIFACT_IMPORT, ArtifactImport
+from plugins.content.api import Reference, Span, TextProtocol, TextSource
+from plugins.content.plugin import CONTENT
+from session.artifacts import AttachmentKind
+from session.message import ContentPart
+
+from .runtime import MemeCatalog, MemeDecorator, MemeSnapshot
 
 _MEME_RE = re.compile(
-    r"(?<!`)<meme:([a-zA-Z0-9_-]+)>(?!`)",
+    r"\s*<meme:([a-zA-Z0-9_-]+)>",
     re.IGNORECASE,
 )
 
-CITATION_PROTOCOL_SERVICE = ServiceKey[object]("citation.protocol")
+
+def _meme_prompt(snapshot: MemeSnapshot) -> str:
+    block = snapshot.build_prompt_block()
+    return "" if block is None else f"# Memes\n\n{block}"
 
 
-def append_meme_prompt(ctx: PromptRenderCtx, catalog: MemeCatalog) -> None:
-    block = catalog.build_prompt_block()
-    if not block:
-        return
-    ctx.system_sections_bottom.append(
-        PromptSectionRender(
-            name="memes",
-            content=f"# Memes\n\n{block}",
-            is_static=False,
+async def decode_meme(
+    source: TextSource,
+    _references: tuple[Reference, ...],
+    *,
+    decorator: MemeDecorator,
+    artifacts: ArtifactImport,
+) -> tuple[Sequence[Span], Mapping[str, object]]:
+    """清理 Meme 标记，选定并导入至多一张不可变图片。"""
+    matches = list(source.matches(_MEME_RE))
+    if not matches:
+        return (), {}
+
+    tag = matches[0].group(1).lower()
+    decorated = decorator.decorate("", meme_tag=tag)
+    parts: tuple[ContentPart, ...] = ()
+    status = "missing"
+    if decorated.media:
+        attachment = await artifacts.import_source(
+            decorated.media[0],
+            AttachmentKind.IMAGE,
         )
+        parts = (ContentPart("artifact_ref", attachment.artifact_id),)
+        status = "selected"
+
+    spans = [
+        Span(match.start(), match.end(), parts if index == 0 else ())
+        for index, match in enumerate(matches)
+    ]
+    return spans, {
+        "version": 1,
+        "category": tag,
+        "selection": "random",
+        "status": status,
+    }
+
+
+def build_protocol(
+    catalog: MemeCatalog,
+    artifacts: ArtifactImport,
+) -> TextProtocol:
+    """固定一次请求共用的类别、提示与图片候选。"""
+    snapshot = catalog.snapshot()
+    decorator = MemeDecorator(snapshot)
+
+    async def decode(source: TextSource, references: tuple[Reference, ...]):
+        return await decode_meme(
+            source,
+            references,
+            decorator=decorator,
+            artifacts=artifacts,
+        )
+
+    return TextProtocol(
+        name="meme",
+        prompt=_meme_prompt(snapshot),
+        decode=decode,
+        content={},
     )
-
-
-def decorate_meme_ctx(ctx: AfterReasoningCtx, decorator: MemeDecorator) -> None:
-    cleaned, tag = _extract_meme_tag(ctx.reply)
-    decorated = decorator.decorate(cleaned, meme_tag=tag)
-    ctx.reply = decorated.content
-    ctx.media.extend(decorated.media)
-    ctx.meme_tag = decorated.tag
 
 
 api_version = 3
 name = "meme"
-version = "1.0.1"
-inject: tuple[ServiceKey[object], ...] = (CITATION_PROTOCOL_SERVICE,)
+version = "2.0.0"
+inject = (CONTENT, ARTIFACT_IMPORT)
 skill_roots = ("skills",)
 dashboard_module = "dashboard.py"
 web_module = "web_module.js"
@@ -56,29 +99,12 @@ workspace_roots = ("memes",)
 
 
 async def apply(ctx: Context, config: object) -> None:
-    """Build Meme domain objects and register their Core-hosted adapters."""
-
-    # 1. Domain state remains plugin-owned and reads the assigned workspace.
+    """注册 Meme 的动态提示、解析器与图片导入贡献。"""
     _ = config
     catalog = MemeCatalog(ctx.workspace_root("memes"))
-    decorator = MemeDecorator(catalog)
-
-    # 2. Lifecycle behavior is owned by reversible Fiber effects.
-    def prompt_listener(prompt: PromptRenderCtx) -> None:
-        append_meme_prompt(prompt, catalog)
-
-    def answer_listener(answer: AfterReasoningCtx) -> None:
-        decorate_meme_ctx(answer, decorator)
-
-    _ = await ctx.on(PROMPT_RENDER_EVENT, prompt_listener)
-    _ = await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, answer_listener)
-
-
-def _extract_meme_tag(response: str) -> tuple[str, str | None]:
-    match = _MEME_RE.search(response)
-    if match is None:
-        return response.strip(), None
-    cleaned = _MEME_RE.sub("", response)
-    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
-    cleaned = re.sub(r" {2,}", " ", cleaned)
-    return cleaned.strip(), match.group(1).lower()
+    artifacts = ctx.require(ARTIFACT_IMPORT)
+    _ = await ctx.require(CONTENT).register(
+        ctx,
+        build_protocol(catalog, artifacts),
+        prepare=lambda: build_protocol(catalog, artifacts),
+    )

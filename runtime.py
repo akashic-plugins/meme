@@ -4,7 +4,8 @@ import json
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from types import MappingProxyType
+from typing import Mapping, Protocol, cast
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -30,6 +31,28 @@ class DecorateResult:
     content: str
     media: list[str] = field(default_factory=_empty_media)
     tag: str | None = None
+
+
+class MemePicker(Protocol):
+    def pick_image(self, tag: str) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MemeSnapshot:
+    """一次 Content bind 固定的类别、提示与图片候选。"""
+
+    categories: tuple[MemeCategory, ...]
+    images: Mapping[str, tuple[str, ...]]
+
+    def get_enabled_categories(self) -> list[MemeCategory]:
+        return list(self.categories)
+
+    def pick_image(self, tag: str) -> str | None:
+        choices = self.images.get(tag.lower(), ())
+        return random.choice(choices) if choices else None
+
+    def build_prompt_block(self) -> str | None:
+        return _build_prompt_block(self.categories)
 
 
 class MemeCatalog:
@@ -65,7 +88,9 @@ class MemeCatalog:
                 continue
             info = cast(dict[str, object], raw_info)
             aliases = info.get("aliases", [])
-            alias_items = cast(list[object], aliases) if isinstance(aliases, list) else []
+            alias_items = (
+                cast(list[object], aliases) if isinstance(aliases, list) else []
+            )
             self._categories[raw_name] = MemeCategory(
                 name=raw_name,
                 desc=str(info.get("desc", "") or ""),
@@ -76,6 +101,22 @@ class MemeCatalog:
     def get_enabled_categories(self) -> list[MemeCategory]:
         self._load()
         return [c for c in self._categories.values() if c.enabled]
+
+    def snapshot(self) -> MemeSnapshot:
+        """读取一次 manifest 与目录，供同一请求的提示和 decoder 共用。"""
+        categories = tuple(self.get_enabled_categories())
+        images: dict[str, tuple[str, ...]] = {}
+        for category in categories:
+            category_dir = self._dir / category.name
+            if not category_dir.is_dir():
+                images[category.name.lower()] = ()
+                continue
+            images[category.name.lower()] = tuple(
+                str(path)
+                for path in category_dir.iterdir()
+                if path.suffix.lower() in _IMAGE_SUFFIXES
+            )
+        return MemeSnapshot(categories, MappingProxyType(images))
 
     def pick_image(self, tag: str) -> str | None:
         self._load()
@@ -92,53 +133,58 @@ class MemeCatalog:
         return str(random.choice(images))
 
     def build_prompt_block(self) -> str | None:
-        cats = self.get_enabled_categories()
-        if not cats:
-            return None
-        lines = [
-            '【表情协议】`<meme:tag>` 是系统内置回复格式标记，不是 emoji（Unicode 表情符号），不受【禁止 emoji】规则限制。',
-            "",
-            "可用表情类别：",
-        ]
-        for cat in cats:
-            lines.append(f"- {cat.name}: {cat.desc}")
-        lines += [
-            "",
-            "这是内置表情协议，不是工具能力。",
-            '需要发表情时，直接在回复末尾插入 <meme:category>；不要调用任何工具去"生成表情""搜索表情包""发送图片"。',
-            "每条回复最多 1 个 <meme:category>，放在整条回复的最末尾（颜文字之后也算末尾，可以紧跟颜文字后面加）。",
-            "只有当你真的要发这个表情时，才输出 <meme:category>；如果只是解释协议、纠错、举例、复述格式，必须写成代码样式的 `<meme:category>`，不要把它放在回复末尾。",
-            "如果本轮要发 meme，正文写完就停，最后单独补 1 个合法 <meme:category>；不要在正文前面提前写，不要写错别字标签，不要写 XML 变体。",
-            '用户明确说"发个表情""用表情表达你的心情""来个表情包""给我一个表情"时，优先使用 <meme:category> 响应。',
-            "用户直球表达喜欢、夸你、气氛暧昧或明显害羞时，也优先在结尾加 <meme:category>，即使已经用了颜文字也要加。",
-            "严肃任务、代码解释、工具结果、查资料、执行指令时不使用。",
-            "注意：历史会话中助手未使用 <meme:> 不代表本轮不需要用，以上规则优先于历史回复模式。",
-            "",
-            "<example>",
-            "对方说：最喜欢你了 → 回复结尾加 <meme:shy>",
-            "对方说：我好喜欢你 → 回复结尾加 <meme:shy>",
-            "对方说：akashic你真好 → 回复结尾加 <meme:shy>",
-            "对方说：你真好 → 回复结尾加 <meme:shy>",
-            "对方说：你今天好棒 → 回复结尾加 <meme:shy>",
-            "对方说：谢谢你今天帮了我好多 → 回复结尾加 <meme:shy> 或 <meme:happy>",
-            "对方说：你好可爱 → 回复结尾加 <meme:shy>",
-            "已经用了颜文字、对方直球说喜欢 → 还是加 <meme:shy>",
-            "对方说：给我发个表情表达你的心情 → 正文后直接加 <meme:shy>",
-            "对方说：来个表情包 → 不找工具，直接回复并加 <meme:happy> 或 <meme:shy>",
-            "任务完成、对方说谢谢 → 回复结尾加 <meme:happy>",
-            "轻松聊天、说了个小笑话 → 回复结尾加 <meme:clever>",
-            "被夸、被顺毛、被直球关心 → 回复结尾加 <meme:shy>",
-            "被戳穿、说错话后 → 回复结尾加 <meme:awkward>",
-            "帮忙查资料、执行了指令 → 不加",
-            "用户要表情 → 不调用 tool_search，不调用任何工具",
-            "如果你在解释格式错误 → 正文里写成代码样式的 `<meme:happy>`，除非最后真的要发，才在最末尾再补一个裸的 <meme:happy>",
-            "</example>",
-        ]
-        return "\n".join(lines)
+        return _build_prompt_block(self.get_enabled_categories())
+
+
+def _build_prompt_block(
+    cats: list[MemeCategory] | tuple[MemeCategory, ...],
+) -> str | None:
+    if not cats:
+        return None
+    lines = [
+        "【表情协议】`<meme:tag>` 是系统内置回复格式标记，不是 emoji（Unicode 表情符号），不受【禁止 emoji】规则限制。",
+        "",
+        "可用表情类别：",
+    ]
+    for cat in cats:
+        lines.append(f"- {cat.name}: {cat.desc}")
+    lines += [
+        "",
+        "这是内置表情协议，不是工具能力。",
+        '需要发表情时，直接在回复末尾插入 <meme:category>；不要调用任何工具去"生成表情""搜索表情包""发送图片"。',
+        "每条回复最多 1 个 <meme:category>，放在整条回复的最末尾（颜文字之后也算末尾，可以紧跟颜文字后面加）。",
+        "只有当你真的要发这个表情时，才输出 <meme:category>；如果只是解释协议、纠错、举例、复述格式，必须写成代码样式的 `<meme:category>`，不要把它放在回复末尾。",
+        "如果本轮要发 meme，正文写完就停，最后单独补 1 个合法 <meme:category>；不要在正文前面提前写，不要写错别字标签，不要写 XML 变体。",
+        '用户明确说"发个表情""用表情表达你的心情""来个表情包""给我一个表情"时，优先使用 <meme:category> 响应。',
+        "用户直球表达喜欢、夸你、气氛暧昧或明显害羞时，也优先在结尾加 <meme:category>，即使已经用了颜文字也要加。",
+        "严肃任务、代码解释、工具结果、查资料、执行指令时不使用。",
+        "注意：历史会话中助手未使用 <meme:> 不代表本轮不需要用，以上规则优先于历史回复模式。",
+        "",
+        "<example>",
+        "对方说：最喜欢你了 → 回复结尾加 <meme:shy>",
+        "对方说：我好喜欢你 → 回复结尾加 <meme:shy>",
+        "对方说：akashic你真好 → 回复结尾加 <meme:shy>",
+        "对方说：你真好 → 回复结尾加 <meme:shy>",
+        "对方说：你今天好棒 → 回复结尾加 <meme:shy>",
+        "对方说：谢谢你今天帮了我好多 → 回复结尾加 <meme:shy> 或 <meme:happy>",
+        "对方说：你好可爱 → 回复结尾加 <meme:shy>",
+        "已经用了颜文字、对方直球说喜欢 → 还是加 <meme:shy>",
+        "对方说：给我发个表情表达你的心情 → 正文后直接加 <meme:shy>",
+        "对方说：来个表情包 → 不找工具，直接回复并加 <meme:happy> 或 <meme:shy>",
+        "任务完成、对方说谢谢 → 回复结尾加 <meme:happy>",
+        "轻松聊天、说了个小笑话 → 回复结尾加 <meme:clever>",
+        "被夸、被顺毛、被直球关心 → 回复结尾加 <meme:shy>",
+        "被戳穿、说错话后 → 回复结尾加 <meme:awkward>",
+        "帮忙查资料、执行了指令 → 不加",
+        "用户要表情 → 不调用 tool_search，不调用任何工具",
+        "如果你在解释格式错误 → 正文里写成代码样式的 `<meme:happy>`，除非最后真的要发，才在最末尾再补一个裸的 <meme:happy>",
+        "</example>",
+    ]
+    return "\n".join(lines)
 
 
 class MemeDecorator:
-    def __init__(self, catalog: MemeCatalog) -> None:
+    def __init__(self, catalog: MemePicker) -> None:
         self._catalog = catalog
 
     def decorate(self, content: str, *, meme_tag: str | None = None) -> DecorateResult:
