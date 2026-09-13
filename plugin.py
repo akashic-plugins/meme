@@ -4,11 +4,17 @@ import re
 from collections.abc import Mapping, Sequence
 
 from agent.plugin_composition import Context
-from agent.plugin_composition.artifacts import ARTIFACT_IMPORT, ArtifactImport
-from plugins.content.api import Reference, Span, TextProtocol, TextSource
-from plugins.content.plugin import CONTENT
-from session.artifacts import AttachmentKind
-from session.message import ContentPart
+from agent.plugin_composition.artifacts import (
+    ARTIFACT_IMPORT,
+    ArtifactImport,
+    AttachmentKind,
+)
+from agent.plugin_contracts import ContentPart
+
+if __package__:
+    from .boundary import CONTENT, Reference, SpanData, TextSource
+else:  # test harness imports the entrypoint as a standalone module
+    from boundary import CONTENT, Reference, SpanData, TextSource
 
 from .runtime import MemeCatalog, MemeDecorator, MemeSnapshot
 
@@ -33,7 +39,7 @@ async def decode_meme(
     *,
     decorator: MemeDecorator,
     artifacts: ArtifactImport,
-) -> tuple[Sequence[Span], Mapping[str, object]]:
+) -> tuple[Sequence[SpanData], Mapping[str, object]]:
     """清理 Meme 标记，选定并导入至多一张不可变图片。"""
     matches = [
         match
@@ -55,8 +61,8 @@ async def decode_meme(
         parts = (ContentPart("artifact_ref", attachment.artifact_id),)
         status = "selected"
 
-    spans = [
-        Span(match.start(), match.end(), parts if index == 0 else ())
+    spans: list[SpanData] = [
+        {"start": match.start(), "end": match.end(), "parts": parts if index == 0 else ()}
         for index, match in enumerate(matches)
     ]
     return spans, {
@@ -70,7 +76,7 @@ async def decode_meme(
 def build_protocol(
     catalog: MemeCatalog,
     artifacts: ArtifactImport,
-) -> TextProtocol:
+) -> Mapping[str, object]:
     """固定一次请求共用的类别、提示与图片候选。"""
     snapshot = catalog.snapshot()
     decorator = MemeDecorator(snapshot)
@@ -83,12 +89,12 @@ def build_protocol(
             artifacts=artifacts,
         )
 
-    return TextProtocol(
-        name="meme",
-        prompt=_meme_prompt(snapshot),
-        decode=decode,
-        content={},
-    )
+    return {
+        "name": "meme",
+        "prompt": _meme_prompt(snapshot),
+        "decode": decode,
+        "content": {},
+    }
 
 
 api_version = 3
