@@ -20,8 +20,8 @@ from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 from infra.channels.artifacts import ChannelAttachmentArtifactStore
+from boundary import CONTENT
 from plugins.content import plugin as content_module
-from plugins.content.plugin import CONTENT
 from session.artifact_store import ArtifactStore
 from session.log import MessageLog
 from session.message import Output
@@ -75,7 +75,7 @@ def test_static_manifest_preserves_package_contributions() -> None:
     assert manifest.name == meme_module.name == "meme"
     assert manifest.version == meme_module.version == "2.0.0"
     assert plugin.inject == (CONTENT, ARTIFACT_IMPORT)
-    assert plugin.skill_roots == ("skills",)
+    assert plugin.asset_roots == (("skills", ("skills",)),)
     assert plugin.dashboard_module == "dashboard.py"
     assert plugin.workspace_roots == ("memes",)
 
@@ -357,8 +357,13 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     await manager.load_all()
     snapshot = manager.current_snapshot
     assert snapshot is not None
-    assert snapshot.plugin_skill_index is not None
-    assert "meme-manage" in snapshot.plugin_skill_index.records
+    generation = manager.generation("meme")
+    assert generation is not None and generation.asset_catalog is not None
+    assert any(
+        asset.category == "skills"
+        and (asset.root_dir / "meme-manage" / "SKILL.md").is_file()
+        for asset in generation.asset_catalog.assets
+    )
     dashboard = PluginDashboardHost(core_routes=())
     dashboard.prepare_snapshot(snapshot)
     assert len(snapshot.dashboard_bindings) == 1
