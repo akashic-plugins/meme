@@ -13,9 +13,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 
 from agent.plugin_composition.artifacts import ARTIFACT_IMPORT
+from agent.plugin_composition.assets import INSTALLED_ASSETS
+from agent.plugin_composition.ui import UI
 from agent.plugins.composable import ComposablePlugin
-from agent.plugins.dashboard_host import DashboardBinding, PluginDashboardHost
+from agent.plugin_composition.ui import DashboardBinding
+from agent.plugins.dashboard_host import PluginDashboardHost
 from agent.plugins.manager import PluginManager
+from agent.plugins.selection import PluginSelection
 from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
@@ -71,7 +75,7 @@ def _write_image(root: Path, category: str, name: str = "001.png") -> Path:
 
 def test_static_manifest_preserves_package_contributions() -> None:
     manifest = load_static_plugin_manifest(Path(meme_module.__file__).parent)
-    plugin = ComposablePlugin.from_module(meme_module)
+    plugin = ComposablePlugin.from_module(meme_module, manifest)
     assert manifest.name == meme_module.name == "meme"
     assert manifest.version == meme_module.version == "2.0.0"
     assert plugin.inject == (CONTENT, ARTIFACT_IMPORT)
@@ -227,12 +231,14 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
     )
     plugin_home = tmp_path / "plugins"
     core_plugins = Path(content_module.__file__).parents[1]
-    shutil.copytree(core_plugins / "content", plugin_home / "content")
+    for provider in ("content", "assets", "ui"):
+        shutil.copytree(core_plugins / provider, plugin_home / provider)
     shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "meme",
         ignore=_copy_ignore(),
     )
+    PluginSelection(workspace).initialize()
     log = MessageLog(workspace / "sessions.db")
     records = ArtifactStore(workspace / "sessions.db")
     physical = ChannelAttachmentArtifactStore(
@@ -253,7 +259,10 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
     assert generation is not None
     assert isinstance(generation.instance, ComposablePlugin)
     assert snapshot.composition_topology is not None
-    assert snapshot.composition_topology.listeners == ()
+    assert all(
+        listener.startswith("serial:snapshot.sealing:")
+        for listener in snapshot.composition_topology.listeners
+    )
 
     lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
     token = bind_runtime_snapshot(lease)
@@ -336,12 +345,14 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
     plugin_home = tmp_path / "plugins"
     core_plugins = Path(content_module.__file__).parents[1]
-    shutil.copytree(core_plugins / "content", plugin_home / "content")
+    for provider in ("content", "assets", "ui"):
+        shutil.copytree(core_plugins / provider, plugin_home / provider)
     shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "meme",
         ignore=_copy_ignore(),
     )
+    PluginSelection(workspace).initialize()
     log = MessageLog(workspace / "sessions.db")
     records = ArtifactStore(workspace / "sessions.db")
     manager = PluginManager(
@@ -366,8 +377,9 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     )
     dashboard = PluginDashboardHost(core_routes=())
     dashboard.prepare_snapshot(snapshot)
-    assert len(snapshot.dashboard_bindings) == 1
-    binding = snapshot.dashboard_bindings[0]
+    bindings = root.context.require(UI).bindings()
+    assert len(bindings) == 1
+    binding = bindings[0]
     assert isinstance(binding, DashboardBinding)
     categories = next(
         route.endpoint
