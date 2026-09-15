@@ -78,9 +78,7 @@ def test_static_manifest_preserves_package_contributions() -> None:
     plugin = ComposablePlugin.from_module(meme_module, manifest)
     assert manifest.name == meme_module.name == "meme"
     assert manifest.version == meme_module.version == "2.0.0"
-    assert plugin.inject == (CONTENT, ARTIFACT_IMPORT)
-    assert plugin.asset_roots == (("skills", ("skills",)),)
-    assert plugin.dashboard_module == "dashboard.py"
+    assert plugin.inject == (CONTENT, ARTIFACT_IMPORT, INSTALLED_ASSETS, UI)
     assert plugin.workspace_roots == ("memes",)
 
 
@@ -368,12 +366,17 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     await manager.load_all()
     snapshot = manager.current_snapshot
     assert snapshot is not None
-    generation = manager.generation("meme")
-    assert generation is not None and generation.asset_catalog is not None
+    root = snapshot.composition_root
+    assert root is not None
+    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
+    token = bind_runtime_snapshot(lease)
+    try:
+        assets = root.context.require(INSTALLED_ASSETS)()
+    finally:
+        reset_runtime_snapshot(token)
+        await lease.release()
     assert any(
-        asset.category == "skills"
-        and (asset.root_dir / "meme-manage" / "SKILL.md").is_file()
-        for asset in generation.asset_catalog.assets
+        item.owner_id == "meme" and item.category == "skills" for item in assets
     )
     dashboard = PluginDashboardHost(core_routes=())
     dashboard.prepare_snapshot(snapshot)
