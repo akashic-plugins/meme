@@ -11,6 +11,8 @@ from agent.plugin_composition.artifacts import (
     ArtifactImport,
     AttachmentKind,
 )
+from agent.plugin_composition.assets import INSTALLED_ASSETS
+from agent.plugin_composition.ui import UI
 from agent.plugin_contracts import ContentPart
 
 if __package__:
