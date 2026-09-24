@@ -20,7 +20,6 @@ from agent.plugin_composition.ui import DashboardBinding
 from agent.plugins.dashboard_host import PluginDashboardHost
 from agent.plugins.manager import PluginManager
 from agent.plugins.selection import PluginSelection
-from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 from infra.channels.artifacts import ChannelAttachmentArtifactStore
@@ -251,21 +250,14 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
         channel_attachment_store=physical,
     )
     await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
+    root = manager.live_root
+    assert root is not None
     generation = manager.generation("meme")
     assert generation is not None
     assert isinstance(generation.instance, ComposablePlugin)
-    assert snapshot.composition_topology is not None
-    assert all(
-        listener.startswith("serial:snapshot.sealing:")
-        for listener in snapshot.composition_topology.listeners
-    )
 
-    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
-    token = bind_runtime_snapshot(lease)
     try:
-        content = snapshot.composition_root.context.require(CONTENT)
+        content = root.context.require(CONTENT)
         async with content.bind() as old_view:
             assert "<meme:shy>" in old_view.prompts[0]
             happy = _write_image(memes, "happy")
@@ -324,9 +316,6 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
             assert not any(part.kind == "artifact_ref" for part in missing_parts)
             assert json_value(missing["meme"])["status"] == "missing"
     finally:
-        reset_runtime_snapshot(token)
-        await lease.release()
-        root = snapshot.composition_root
         await manager.terminate_all()
         records.close()
         log.close()
@@ -364,23 +353,21 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
         ),
     )
     await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None
-    root = snapshot.composition_root
+    root = manager.live_root
     assert root is not None
-    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
-    token = bind_runtime_snapshot(lease)
-    try:
-        assets = root.context.require(INSTALLED_ASSETS)()
-    finally:
-        reset_runtime_snapshot(token)
-        await lease.release()
+    generation = manager.generation("meme")
+    assert generation is not None and generation.fiber is not None
+    ctx = generation.fiber.context
+    async with ctx.runtime_scope():
+        assets = ctx.require(INSTALLED_ASSETS)(ctx)
     assert any(
         item.owner_id == "meme" and item.category == "skills" for item in assets
     )
-    dashboard = PluginDashboardHost(core_routes=())
-    dashboard.prepare_snapshot(snapshot)
-    bindings = root.context.require(UI).bindings()
+    dashboard = PluginDashboardHost(manager)
+    current = dashboard.current()
+    assert current is not None
+    assert current[0] is root
+    bindings = current[2].bindings()
     assert len(bindings) == 1
     binding = bindings[0]
     assert isinstance(binding, DashboardBinding)
