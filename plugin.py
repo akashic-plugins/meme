@@ -103,7 +103,7 @@ def build_protocol(
 
 api_version = 3
 name = "meme"
-version = "2.0.1"
+version = "2.0.2"
 inject = (CONTENT, ARTIFACT_IMPORT, INSTALLED_ASSETS, UI)
 workspace_roots = ("memes",)
 
@@ -112,13 +112,7 @@ async def apply(ctx: Context) -> None:
     """注册 Meme 的动态提示、解析器与图片导入贡献。"""
     _ = await ctx.require(INSTALLED_ASSETS).register(ctx, "skills", "skills")
     await ctx.require(UI).register(
-        ctx, web="web_module.js",
-        dashboard=lambda: import_module(".dashboard", __package__),
-        requires=("workbench.panels.v2",),
-        provides=(),
-        contract_digests={
-            "workbench.panels.v2": "fb6417c9bf532c1fdb344767d06065d5d3293da85deb64eff1e8088889a33bcb",
-        },
+        ctx, dashboard=lambda: import_module(".dashboard", __package__),
     )
     catalog = MemeCatalog(ctx.workspace_root("memes"))
     artifacts = ctx.require(ARTIFACT_IMPORT)
