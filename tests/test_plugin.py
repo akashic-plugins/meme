@@ -14,11 +14,10 @@ from fastapi.routing import APIRoute
 
 from agent.plugin_composition.artifacts import ARTIFACT_IMPORT
 from agent.plugins.composable import ComposablePlugin
-from agent.plugin_composition.ui import UI
-from agent.plugin_composition.assets import INSTALLED_ASSETS
+from plugins.ui.contract import UI
+from plugins.assets.contract import INSTALLED_ASSETS
 from agent.plugins.manager import PluginManager
 from tests.fixtures.plugin_workspace import initialize_plugin_workspace
-from bus.event_bus import EventBus
 from infra.channels.artifacts import ChannelAttachmentArtifactStore
 from boundary import CONTENT
 from plugins.content import plugin as content_module
@@ -234,7 +233,6 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
     )
     manager = PluginManager(
         plugin_dirs=[plugin_home],
-        event_bus=EventBus(),
         workspace=workspace,
         message_log=log,
         channel_attachment_store=physical,
@@ -333,7 +331,6 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     records = ArtifactStore(workspace / "sessions.db")
     manager = PluginManager(
         plugin_dirs=[plugin_home],
-        event_bus=EventBus(),
         workspace=workspace,
         message_log=log,
         channel_attachment_store=ChannelAttachmentArtifactStore(

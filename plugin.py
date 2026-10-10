@@ -11,8 +11,8 @@ from agent.plugin_composition.artifacts import (
     ArtifactImport,
     AttachmentKind,
 )
-from agent.plugin_composition.assets import INSTALLED_ASSETS
-from agent.plugin_composition.ui import UI
+from plugins.assets.contract import INSTALLED_ASSETS
+from plugins.ui.contract import UI
 from agent.plugin_contracts import ContentPart
 
 if __package__:
@@ -103,7 +103,7 @@ def build_protocol(
 
 api_version = 3
 name = "meme"
-version = "2.0.0"
+version = "2.0.1"
 inject = (CONTENT, ARTIFACT_IMPORT, INSTALLED_ASSETS, UI)
 workspace_roots = ("memes",)
 
