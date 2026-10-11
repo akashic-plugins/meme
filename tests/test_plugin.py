@@ -12,19 +12,19 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 
-from agent.plugin_composition.artifacts import ARTIFACT_IMPORT
+from plugins.ledger.contract import ARTIFACT_IMPORT
 from agent.plugins.composable import ComposablePlugin
 from plugins.ui.contract import UI
 from plugins.assets.contract import INSTALLED_ASSETS
 from agent.plugins.manager import PluginManager
 from tests.fixtures.plugin_workspace import initialize_plugin_workspace
-from infra.channels.artifacts import ChannelAttachmentArtifactStore
-from boundary import CONTENT
+from plugins.ledger.attachments import ChannelAttachmentArtifactStore
+from plugins.content.contract import CONTENT
 from plugins.content import plugin as content_module
-from session.artifact_store import ArtifactStore
-from session.log import MessageLog
-from session.message import Output
-from session.message_codec import json_value
+from plugins.ledger.artifact_store import ArtifactStore
+from plugins.ledger.log import MessageLog
+from plugins.ledger.contract import Output
+from plugins.ledger.contract import json_value
 from runtime import MemeCatalog, MemeDecorator
 
 
@@ -218,7 +218,7 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
     )
     plugin_home = tmp_path / "plugins"
     core_plugins = Path(content_module.__file__).parents[1]
-    for provider in ("content", "assets", "ui"):
+    for provider in ("ledger", "content", "assets", "ui"):
         shutil.copytree(core_plugins / provider, plugin_home / provider)
     shutil.copytree(
         Path(__file__).parents[1],
@@ -231,12 +231,7 @@ async def test_real_manager_content_service_freezes_each_catalog_and_artifact(
         workspace=workspace,
         metadata_store=records,
     )
-    manager = PluginManager(
-        plugin_dirs=[plugin_home],
-        workspace=workspace,
-        message_log=log,
-        channel_attachment_store=physical,
-    )
+    manager = PluginManager(plugin_dirs=[plugin_home], workspace=workspace)
     await manager.load_all()
     root = manager.live_root
     assert root is not None
@@ -320,7 +315,7 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     _write_manifest(memes, {"shy": {"desc": "害羞", "enabled": True}})
     plugin_home = tmp_path / "plugins"
     core_plugins = Path(content_module.__file__).parents[1]
-    for provider in ("content", "assets", "ui"):
+    for provider in ("ledger", "content", "assets", "ui"):
         shutil.copytree(core_plugins / provider, plugin_home / provider)
     shutil.copytree(
         Path(__file__).parents[1],
@@ -329,15 +324,7 @@ async def test_real_manager_keeps_dashboard_and_skill_contributions(
     )
     log = MessageLog(workspace / "sessions.db")
     records = ArtifactStore(workspace / "sessions.db")
-    manager = PluginManager(
-        plugin_dirs=[plugin_home],
-        workspace=workspace,
-        message_log=log,
-        channel_attachment_store=ChannelAttachmentArtifactStore(
-            workspace=workspace,
-            metadata_store=records,
-        ),
-    )
+    manager = PluginManager(plugin_dirs=[plugin_home], workspace=workspace)
     await manager.load_all()
     await manager.start_runtime()
     root = manager.live_root
