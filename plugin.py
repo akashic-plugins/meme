@@ -6,19 +6,12 @@ from collections.abc import Mapping, Sequence
 from importlib import import_module
 
 from agent.plugin_composition import Context
-from agent.plugin_composition.artifacts import (
-    ARTIFACT_IMPORT,
-    ArtifactImport,
-    AttachmentKind,
-)
+from plugins.ledger.contract import ARTIFACT_IMPORT, ArtifactImport, AttachmentKind
 from plugins.assets.contract import INSTALLED_ASSETS
 from plugins.ui.contract import UI
-from agent.plugin_contracts import ContentPart
+from plugins.ledger.contract import ContentPart
 
-if __package__:
-    from .boundary import CONTENT, Reference, SpanData, TextSource
-else:  # test harness imports the entrypoint as a standalone module
-    from boundary import CONTENT, Reference, SpanData, TextSource
+from plugins.content.contract import CONTENT, Reference, SpanData, TextSource
 
 from .runtime import MemeCatalog, MemeDecorator, MemeSnapshot
 
